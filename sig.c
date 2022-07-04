@@ -5,9 +5,12 @@
 #include <bee2/crypto/brng.h>>
 #include <bee2/core/err.h>
 #include <bee2/core/util.h>
-#define cmd_t octet 
+#include "bee2/core/mem.h"
+#include "../cmd.h"
+#include "bee2/crypto/belt.h"
+#include "bee2/core/hex.h"
 
-#define PRIV_KEY_SIZE 64
+#define cmd_t octet
 
 #define ARG_KEY "-k"
 #define ARG_SIG_FILE "-s"
@@ -45,7 +48,9 @@
 static const char _name[] = "sig";
 static const char _descr[] = "make and verify digital signature";
 
-bool_t has_arg(int argc, char* argv[], const char* arg){
+extern int bsumHashFile(octet hash[], size_t hid, const char* filename);
+
+bool_t has_arg(int argc,const char* argv[], const char* arg){
 	for (int i = 0; i< argc; i++){
 		if (strcmp(arg,argv[i])==0)
 			return TRUE;
@@ -149,8 +154,7 @@ static int sigUsage()
 	return -1;
 }
 
-
-static char* sigCurveName(int hid){
+static const char* sigCurveName(size_t hid){
 	switch (hid)
 	{
 	case 128:
@@ -158,17 +162,17 @@ static char* sigCurveName(int hid){
 	case 192:
 		return "1.2.112.0.2.0.34.101.45.3.2";
 	case 256:
-		return "1.2.112.0.2.0.34.101.45.3.3";
+		return "1.2.112.0.2.0.34.101.45.3.1";
 	default:
-		return NULL;
+        return "1.2.112.0.2.0.34.101.45.3.1";
 	}
 }
 
 static err_t sigSign(const char* file_name, const char* sig_name, const char* key_name){
-	octet key[32];
-	octet hash[32];
+	octet key[64];
+	octet hash[64];
 	octet sig[96];
-	char* curve;
+	const char* curve;
 	FILE* key_file;
 	FILE* sig_file;
 	size_t key_size;
@@ -188,8 +192,8 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	}
 	key_size = fread(key,1, sizeof(key), key_file);
 	fclose(key_file);
-
-	bsumHashFile(hash, key_size, file_name);
+    memSetZero(hash,sizeof(hash));
+	bsumHashFile(hash, 0, file_name);
 	curve = sigCurveName(key_size*8);
 	if (curve == NULL){
 		printf("FAILED: error key size: %d",key_size * 8);
@@ -209,6 +213,8 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	brngCTRXStart(beltH() + 128, beltH() + 128 + 64,
 	    beltH(), 8 * 32, brng_state);
 
+    memSetZero(sig,sizeof(sig));
+
 	if (error = bignSign(sig, &params, oid_der, oid_len,hash, key, brngCTRXStepR, brng_state) != ERR_OK)
 		return error;
 
@@ -223,17 +229,17 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 		return ERR_FILE_OPEN;
 	}
 
-	fwrite(sig, 1, key_size*3, sig_file);
-	fclose(sig);
+	fwrite(sig, 1, key_size*3/2, sig_file);
+	fclose(sig_file);
 	printf("Sig saved to %s\n",sig_name);
 	return ERR_OK;
 }
 
 static err_t sigVfy(const char* file_name, const char* sig_name, const char* key_name){
-	octet key[32];
-	octet hash[32];
+	octet key[128];
+	octet hash[64];
 	octet sig[96];
-	char* curve;
+	const char* curve;
 	FILE* key_file;
 	FILE* sig_file;
 	size_t key_size;
@@ -249,9 +255,9 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 		return ERR_FILE_OPEN;
 	}
 	key_size = fread(key,1, sizeof(key), key_file);
-	bsumHashFile(hash, key_size, file_name);
+    bsumHashFile(hash, 0, file_name);
 
-	curve = sigCurveName(key_size);
+	curve = sigCurveName(key_size*8/2);
 	if (curve == NULL){
 		printf("FAILED: error key size : %d", key_size);
 		return ERR_BAD_LENGTH;
@@ -274,9 +280,11 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 		return ERR_FILE_OPEN;
 	}
 
-	fread(sig, 1, key_size*3, sig_file);
+	fread(sig, 1, key_size*3/4, sig_file);
 
-	return bignVerify(&params,oid_der,oid_len,hash, sig, key);
+	error = bignVerify(&params,oid_der,oid_len,hash, sig, key);
+    printf(error == ERR_OK ? "Correct" : "Incorrect");
+    return error;
 }
 
 static err_t sigPrint(char* sig_name){
@@ -308,8 +316,10 @@ int sigMain(int argc, char* argv[]){
 	// справка
 	if (argc < 3)
 		return sigUsage();
-	
-	cmd_t cmd = get_command(argv[1]);
+
+    cmd_t cmd;
+
+    cmd = get_command(argv[1]);
 
 
 	if (cmd == COMMAND_SIGN || cmd == COMMAND_VFY){
@@ -338,10 +348,6 @@ int sigMain(int argc, char* argv[]){
 		break;
 	default:
 		return sigUsage();
-	}
-
-	if (code != ERR_OK){
-		printf("ERROR %d\n", code);
 	}
 	return (code == ERR_OK) ? 0 : -1;
 }
