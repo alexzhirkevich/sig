@@ -162,9 +162,9 @@ static const char* sigCurveName(size_t hid){
 	case 192:
 		return "1.2.112.0.2.0.34.101.45.3.2";
 	case 256:
-		return "1.2.112.0.2.0.34.101.45.3.1";
+		return "1.2.112.0.2.0.34.101.45.3.3";
 	default:
-        return "1.2.112.0.2.0.34.101.45.3.1";
+        return NULL;
 	}
 }
 
@@ -194,12 +194,12 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	fclose(key_file);
     memSetZero(hash,sizeof(hash));
 	bsumHashFile(hash, 0, file_name);
-	curve = sigCurveName(key_size*8);
+	
+	curve = sigCurveName(key_size*4);
 	if (curve == NULL){
 		printf("FAILED: error key size: %d",key_size * 8);
-		return ERR_BAD_LENGTH;
+		return ERR_BAD_PRIVKEY;
 	}
-	bignStdParams(&params,curve);
 
 	if (error = bignStdParams(&params, curve) != ERR_OK)
 		return error;
@@ -235,7 +235,7 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	return ERR_OK;
 }
 
-static err_t sigVfy(const char* file_name, const char* sig_name, const char* key_name){
+static err_t sigVfy(const char* file_name, const char* sig_name, const char* key_name) {
 	octet key[128];
 	octet hash[64];
 	octet sig[96];
@@ -243,6 +243,7 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 	FILE* key_file;
 	FILE* sig_file;
 	size_t key_size;
+	size_t sig_size;
 	bign_params params;
 	err_t error;
 	octet oid_der[128];
@@ -257,12 +258,11 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 	key_size = fread(key,1, sizeof(key), key_file);
     bsumHashFile(hash, 0, file_name);
 
-	curve = sigCurveName(key_size*8/2);
+	curve = sigCurveName(key_size*2);
 	if (curve == NULL){
-		printf("FAILED: error key size : %d", key_size);
-		return ERR_BAD_LENGTH;
+		printf("FAILED: error key size : %d", key_size*8);
+		return ERR_BAD_PUBKEY;
 	}
-	bignStdParams(&params,curve);
 
 	if (error = bignStdParams(&params, curve) != ERR_OK)
 		return error;
@@ -280,12 +280,65 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 		return ERR_FILE_OPEN;
 	}
 
-	fread(sig, 1, key_size*3/4, sig_file);
+	sig_size = fread(sig, 1, sizeof(sig), sig_file);
+	if (sig_size != key_size*3/4){
+		printf("Incorrect sig length: %d. Must be %d\n", sig_size, key_size *3/4);
+		return ERR_BAD_SIG;
+	}
 
 	error = bignVerify(&params,oid_der,oid_len,hash, sig, key);
-    printf(error == ERR_OK ? "Correct" : "Incorrect");
+	if (error == ERR_OK)
+		printf("Correct\n");
+	else printf("Incorrect. Code: %d", error);
     return error;
 }
+
+
+static err_t generate_test_keys(){
+
+	bign_params params;
+	octet oid_der[128];
+	size_t oid_len;
+	err_t error;
+	octet priv_key[64];
+	octet pub_key[128];
+	octet brng_state[1024];
+	FILE* f;
+
+	memSetZero(priv_key, sizeof(priv_key));
+	memSetZero(pub_key, sizeof(pub_key));
+
+	ASSERT(sizeof(brng_state) >= brngCTRX_keep());
+
+	int l = 256;
+	int priv_key_size = l/4;
+	int pub_key_size = l/2;
+	char* pub_name = "public3";
+	char* priv_name = "private3";
+	char* curve = sigCurveName(l);
+
+	if (error = bignStdParams(&params, curve) != ERR_OK)
+		return error;
+	if (error = bignValParams(&params) != ERR_OK)
+		return error;
+
+	brngCTRXStart(beltH() + 128, beltH() + 128 + 64,
+	    beltH(), 8 * 32, brng_state);
+
+	if (error = bignGenKeypair(priv_key,pub_key, &params,brngCTRXStepR, brng_state) != ERR_OK)
+		return error;
+	if (error = bignValKeypair(&params,priv_key, pub_key) != ERR_OK)
+		return error;
+	f = fopen(pub_name,"wb");
+	fwrite(pub_key, 1, pub_key_size,f);
+	fclose(f);
+	f = fopen(priv_name,"wb");
+	fwrite(priv_key,1, priv_key_size,f);
+	fclose(f);
+	
+	return ERR_OK;
+}
+
 
 static err_t sigPrint(char* sig_name){
 	octet sig[96];
@@ -300,15 +353,15 @@ static err_t sigPrint(char* sig_name){
 	}
 	
 	sig_len = fread(sig, 1, 96, sig_file);
+
+	hexFrom(hex_sig,sig,sig_len);
 	
-	for (size_t i = 0; i < sig_len; i++)
-	{
-		hexFrom(hex_sig,sig,sig_len);
-	}
 	printf(hex_sig);
+	generate_test_keys();
+	return ERR_OK;
 }
 
-int sigMain(int argc, char* argv[]){
+static int sigMain(int argc, char* argv[]){
 	err_t code;
 	const char* key_name;
 	const char* sig_name;
