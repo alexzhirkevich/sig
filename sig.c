@@ -168,6 +168,20 @@ static const char* sigCurveName(size_t hid){
 	}
 }
 
+static const char* sigHashAlgIdentifier(size_t hid){
+	switch (hid)
+	{
+	case 128:
+		return "1.2.112.0.2.0.34.101.31.81";
+	case 192:
+		return "1.2.112.0.2.0.34.101.77.12";
+	case 256:
+		return "1.2.112.0.2.0.34.101.77.13";
+	default:
+        return NULL;
+	}
+}
+
 static err_t sigSign(const char* file_name, const char* sig_name, const char* key_name){
 	octet key[64];
 	octet hash[64];
@@ -192,8 +206,9 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	}
 	key_size = fread(key,1, sizeof(key), key_file);
 	fclose(key_file);
+
     memSetZero(hash,sizeof(hash));
-	bsumHashFile(hash, 0, file_name);
+	bsumHashFile(hash, key_size == 32 ? 0 : key_size*8, file_name);
 	
 	curve = sigCurveName(key_size*4);
 	if (curve == NULL){
@@ -207,7 +222,7 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 		return error;
 
 	oid_len = sizeof(oid_der);
-	if (error = bignOidToDER(oid_der, &oid_len, "1.2.112.0.2.0.34.101.31.81") != ERR_OK)
+	if (error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*4)) != ERR_OK)
 		return error;
 
 	brngCTRXStart(beltH() + 128, beltH() + 128 + 64,
@@ -256,8 +271,7 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 		return ERR_FILE_OPEN;
 	}
 	key_size = fread(key,1, sizeof(key), key_file);
-    bsumHashFile(hash, 0, file_name);
-
+    bsumHashFile(hash, key_size == 64 ? 0 : key_size*4, file_name);
 	curve = sigCurveName(key_size*2);
 	if (curve == NULL){
 		printf("FAILED: error key size : %d", key_size*8);
@@ -271,7 +285,7 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 		return error;
 
 	oid_len = sizeof(oid_der);
-	if (error = bignOidToDER(oid_der, &oid_len, "1.2.112.0.2.0.34.101.31.81") != ERR_OK)
+	if (error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*2)) != ERR_OK)
 		return error;
 
 	sig_file = fopen(sig_name, "rb");
