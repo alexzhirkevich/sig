@@ -3,7 +3,7 @@
 #include <string.h>
 #include <bee2/crypto/bash.h>
 #include <bee2/crypto/bign.h>
-#include <bee2/crypto/brng.h>>
+#include <bee2/crypto/brng.h>
 #include <bee2/core/err.h>
 #include <bee2/core/util.h>
 #include "bee2/core/mem.h"
@@ -51,7 +51,6 @@ static const char _descr[] = "make and verify digital signature";
 
 int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigned endPadding)
 {
-
 	size_t file_size;
 	size_t total_readed;
 	bool_t eof_reached;
@@ -89,11 +88,9 @@ int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigne
 		count = fread(buf, 1, sizeof(buf), fp);
 
 		if (endPadding > 0 && total_readed + count > file_size - endPadding){
-			count = total_readed + count - file_size - endPadding;
+			count = total_readed + count - file_size + endPadding;
 			eof_reached = TRUE;
 		}
-		printf("eend p is %d, count is %d\n", endPadding, count);
-
 		if (count == 0)
 		{
 			if (ferror(fp))
@@ -115,7 +112,7 @@ int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigne
 	return 0;
 }
 
-bool_t has_arg(int argc,const char* argv[], const char* arg){
+bool_t has_arg(int argc, char* argv[], const char* arg){
 	for (int i = 0; i< argc; i++){
 		if (strcmp(arg,argv[i])==0)
 			return TRUE;
@@ -139,7 +136,7 @@ cmd_t get_command(const char* arg) {
     return COMMAND_UNKNOWN;
 }
 
-const char* findArg(int argc,const char* argv[], const char *argName){
+const char* findArg(int argc,char* argv[], const char *argName){
        
     for (int i = 0; i < argc-1; i++){
         if (strcmp(argv[i], argName) == 0){
@@ -262,8 +259,6 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	octet oid_der[128];
 	size_t oid_len;
 	octet brng_state[1024];
-	char* append_command[1024];
-	size_t append_command_offset;
 
 	ASSERT(sizeof(brng_state) >= brngCTRX_keep());
 
@@ -280,8 +275,7 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 
     memSetZero(hash,sizeof(hash));
 
-	printf("sig file is %s\n",sig_file);
-	if (sig_file){
+	if (sig_name){
 		end_padding = 0;
 	} else {
 		end_padding = sig_size;
@@ -312,36 +306,24 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	if (error = bignSign(sig, &params, oid_der, oid_len,hash, key, brngCTRXStepR, brng_state) != ERR_OK)
 		return error;
 
-	if (sig_name){
-		// запись подпииси в отдельный файл
-		sig_file = fopen(sig_name, "wb");
-		if (!sig_file){
-			printf("%s: FAILED [open]\n", sig_name);
-			return ERR_FILE_OPEN;
-		}
+	if (sig_name) {
+        sig_file = fopen(sig_name, "wb");
+        if (!sig_file) {
+            printf("%s: FAILED [open]\n", sig_name);
+            return ERR_FILE_OPEN;
+        }
+    }
+    else {
+        sig_file = fopen(file_name, "a");
+        if (!sig_file){
+            printf("%s: FAILED [open]\n", sig_name);
+            return ERR_FILE_OPEN;
+        }
+    }
+    fwrite(sig, 1, sig_size, sig_file);
+    fclose(sig_file);
+    printf("Sig saved to %s\n", sig_name ? sig_name : file_name);
 
-		fwrite(sig, 1, sig_size, sig_file);
-		fclose(sig_file);
-		printf("Sig saved to %s\n",sig_name);
-	} else {
-		//запись подписи в конец исполняемого файла;
-		sprintf(append_command,"echo ");
-		append_command_offset = sizeof("echo ")-1;
-		for (int i = 0; i< sig_size; i++){
-			append_command[append_command_offset+i] = sig[i];
-		}
-		append_command_offset += sig_size;
-
-		sprintf(append_command + append_command_offset, " >> %s", file_name);
-
-		printf(append_command);
-	
-		system(append_command);
-		printf("Sig saved to signed executable - %s\n",sig_name);
-
-	}
-
-	
 	return ERR_OK;
 }
 
@@ -374,7 +356,7 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 
 	key_size = fread(key,1, sizeof(key), key_file);
 	sig_size =  key_size*3/4;
-	if (sig_file){
+	if (sig_name){
 		end_padding = 0;
 	} else {
 		end_padding = sig_size;
@@ -428,8 +410,6 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 static err_t generate_test_keys(){
 
 	bign_params params;
-	octet oid_der[128];
-	size_t oid_len;
 	err_t error;
 	octet priv_key[64];
 	octet pub_key[128];
@@ -488,7 +468,6 @@ static err_t sigPrint(char* sig_name){
 	hexFrom(hex_sig,sig,sig_len);
 	
 	printf(hex_sig);
-	generate_test_keys();
 	return ERR_OK;
 }
 
@@ -496,7 +475,6 @@ static int sigMain(int argc, char* argv[]){
 	err_t code;
 	const char* key_name;
 	const char* sig_name;
-	const char* file_name;
 	cmd_t cmd;
 	// справка
 	if (argc < 3)
@@ -514,7 +492,7 @@ static int sigMain(int argc, char* argv[]){
 		sig_name = findArg(argc, argv, ARG_SIG_FILE);
 	
 		if (!sig_name && !has_arg(argc, argv, ARG_EXEC)){
-			printf("One of arguments %s, %s is requred", ARG_SIG_FILE, ARG_EXEC);
+			printf("One of arguments %s, %s is required", ARG_SIG_FILE, ARG_EXEC);
 			return ERR_CMD_PARAMS;
 		}
 	}
@@ -537,5 +515,6 @@ static int sigMain(int argc, char* argv[]){
 }
 
 err_t sigInit(){
+    generate_test_keys();
 	return cmdReg(_name, _descr, sigMain);
 }
