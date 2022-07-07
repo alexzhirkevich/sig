@@ -49,78 +49,7 @@
 static const char _name[] = "sig";
 static const char _descr[] = "make and verify digital signature";
 
-int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigned endPadding)
-{
-	size_t file_size;
-	size_t total_readed;
-	bool_t eof_reached;
-	FILE* fp;
-	octet state[4096];
-	octet buf[4096];
-	size_t count;
-	// открыть файл
-	fp = fopen(filename, "rb");
-
-
-	if (!fp)
-	{
-		printf("%s: FAILED [open]\n", filename);
-		return -1;
-	}
-
-	if (endPadding > 0){
-		fseek(fp,0L,SEEK_END);
-		file_size = ftell(fp);
-		rewind(fp);
-	} else {
-		file_size = 0;
-	}
-	
-	total_readed = 0;
-	eof_reached = FALSE;
-
-	// хэшировать
-	ASSERT(beltHash_keep() <= sizeof(state));
-	ASSERT(bashHash_keep() <= sizeof(state));
-	hid ? bashHashStart(state, hid / 2) : beltHashStart(state);
-	while (!eof_reached)
-	{
-		count = fread(buf, 1, sizeof(buf), fp);
-
-		if (endPadding > 0 && total_readed + count > file_size - endPadding){
-			count = total_readed + count - file_size + endPadding;
-			eof_reached = TRUE;
-		}
-		if (count == 0)
-		{
-			if (ferror(fp))
-			{
-				fclose(fp);
-				printf("%s: FAILED [read]\n", filename);
-				return -1;
-			}
-			break;
-		}
-		hid ? bashHashStepH(buf, count, state) : 
-			beltHashStepH(buf, count, state);
-
-		total_readed +=count;
-	}
-	// завершить
-	fclose(fp);
-	hid ? bashHashStepG(hash, hid / 8, state) : beltHashStepG(hash, state);
-	return 0;
-}
-
-bool_t has_arg(int argc, char* argv[], const char* arg){
-	for (int i = 0; i< argc; i++){
-		if (strcmp(arg,argv[i])==0)
-			return TRUE;
-	}
-	return FALSE;
-}
-
-cmd_t get_command(const char* arg) {
+cmd_t getCommand(const char* arg) {
     if (!arg){
         return COMMAND_UNKNOWN;
     }
@@ -136,7 +65,7 @@ cmd_t get_command(const char* arg) {
     return COMMAND_UNKNOWN;
 }
 
-const char* findArg(int argc,char* argv[], const char *argName){
+const char* findArgument(int argc,char* argv[], const char *argName){
        
     for (int i = 0; i < argc-1; i++){
         if (strcmp(argv[i], argName) == 0){
@@ -244,6 +173,69 @@ static const char* sigHashAlgIdentifier(size_t hid){
 	}
 }
 
+int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigned endPadding)
+{
+	size_t file_size;
+	size_t total_readed;
+	bool_t eof_reached;
+	FILE* fp;
+	octet state[4096];
+	octet buf[4096];
+	size_t count;
+	// открыть файл
+	fp = fopen(filename, "rb");
+
+
+	if (!fp)
+	{
+		printf("%s: FAILED [open]\n", filename);
+		return -1;
+	}
+
+	if (endPadding > 0){
+		fseek(fp,0L,SEEK_END);
+		file_size = ftell(fp);
+		rewind(fp);
+	} else {
+		file_size = 0;
+	}
+	
+	total_readed = 0;
+	eof_reached = FALSE;
+
+	// хэшировать
+	ASSERT(beltHash_keep() <= sizeof(state));
+	ASSERT(bashHash_keep() <= sizeof(state));
+	hid ? bashHashStart(state, hid / 2) : beltHashStart(state);
+	while (!eof_reached)
+	{
+		count = fread(buf, 1, sizeof(buf), fp);
+
+		if (endPadding > 0 && total_readed + count > file_size - endPadding){
+			count = total_readed + count - file_size + endPadding;
+			eof_reached = TRUE;
+		}
+		if (count == 0)
+		{
+			if (ferror(fp))
+			{
+				fclose(fp);
+				printf("%s: FAILED [read]\n", filename);
+				return -1;
+			}
+			break;
+		}
+		hid ? bashHashStepH(buf, count, state) : 
+			beltHashStepH(buf, count, state);
+
+		total_readed +=count;
+	}
+	// завершить
+	fclose(fp);
+	hid ? bashHashStepG(hash, hid / 8, state) : beltHashStepG(hash, state);
+	return 0;
+}
+
 static err_t sigSign(const char* file_name, const char* sig_file_name, const char* key_name){
 	octet key[64];
 	octet hash[64];
@@ -285,7 +277,7 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	
 	curve = sigCurveName(key_size*4);
 	if (curve == NULL){
-		printf("FAILED: error key size: %d",key_size * 8);
+		printf("FAILED: error key size: %lu", key_size * 8);
 		return ERR_BAD_PRIVKEY;
 	}
 
@@ -303,6 +295,7 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 
     memSetZero(sig,sizeof(sig));
 
+
 	if (error = bignSign(sig, &params, oid_der, oid_len,hash, key, brngCTRXStepR, brng_state) != ERR_OK)
 		return error;
 
@@ -316,7 +309,7 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
     else {
         sig_file = fopen(file_name, "a");
         if (!sig_file){
-            printf("%s: FAILED [open]\n", sig_file_name);
+            printf("%s: FAILED [open]\n", file_name);
             return ERR_FILE_OPEN;
         }
     }
@@ -366,7 +359,7 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 
 	curve = sigCurveName(key_size*2);
 	if (curve == NULL){
-		printf("FAILED: error key size : %d", key_size*8);
+		printf("FAILED: error key size : %lu", key_size*8);
 		return ERR_BAD_PUBKEY;
 	}
 
@@ -424,6 +417,10 @@ static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 		fseek(sig_file, file_size-1, SEEK_SET);
 		fread(&sig_len_bytes, 1, 1, sig_file);
 		sig_len = sig_len_bytes;
+		if (sig_len >96) {
+			printf("Executable file doesn't have signature or sig length is not correct;");
+			return ERR_BAD_SIG;
+		}
 		fseek(sig_file, file_size - sig_len - 1, SEEK_SET);	
 		fread(sig,1, sig_len, sig_file);
 	} else {
@@ -445,18 +442,18 @@ static int sigMain(int argc, char* argv[]){
 	if (argc < 3)
 		return sigUsage();
 
-    cmd = get_command(argv[1]);
+    cmd = getCommand(argv[1]);
 
 
 	if (cmd == COMMAND_SIGN || cmd == COMMAND_VFY){
-		key_name = findArg(argc,argv, ARG_KEY);
+		key_name = findArgument(argc,argv, ARG_KEY);
 		if (!key_name){
 			printf("%s argument is required", ARG_KEY);
 			return ERR_CMD_PARAMS; 
 		}
-		sig_file_name = findArg(argc, argv, ARG_SIG_FILE);
+		sig_file_name = findArgument(argc, argv, ARG_SIG_FILE);
 	
-		if (!sig_file_name && !has_arg(argc, argv, ARG_EXEC)){
+		if (!sig_file_name && !findArgument(argc, argv, ARG_EXEC)){
 			printf("One of arguments %s, %s is required", ARG_SIG_FILE, ARG_EXEC);
 			return ERR_CMD_PARAMS;
 		}
@@ -471,7 +468,7 @@ static int sigMain(int argc, char* argv[]){
 		code = sigVfy(argv[argc-1], sig_file_name, key_name);
 		break;
 	case COMMAND_PRINT:
-		code = sigPrint(argv[argc-1], findArg(argc, argv, ARG_EXEC) != NULL);
+		code = sigPrint(argv[argc-1], findArgument(argc, argv, ARG_EXEC) != NULL);
 		break;
 	default:
 		return sigUsage();
