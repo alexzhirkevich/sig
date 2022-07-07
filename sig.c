@@ -203,11 +203,11 @@ static int sigUsage()
 	printf(
 		"bee2cmd/%s: %s\n"
 		"Usage:\n"
-		"  sig sign [--executable] [-s <sig_name>] -k <private_key> <file_name>\n"
-		"    sign <file_name> with <private_key> and write signature to <sig_name>"
+		"  sig sign [--executable] [-s <sig_file_name>] -k <private_key> <file_name>\n"
+		"    sign <file_name> with <private_key> and write signature to <sig_file_name>"
         "    if file is not executable or embed it otherwise\n"
-		"  sig vfy [--executable] [-s <sig_name>] -k <public_key> <file_name>\n"
-		"    verify signature of <file_name>, that is stored in <sig_name> if file"
+		"  sig vfy [--executable] [-s <sig_file_name>] -k <public_key> <file_name>\n"
+		"    verify signature of <file_name>, that is stored in <sig_file_name> if file"
         "    is not executable and embeded otherwice\n"
 		"  sig print [--executable] <file_with_signature>\n"
 		"    print the signature\n",
@@ -244,7 +244,7 @@ static const char* sigHashAlgIdentifier(size_t hid){
 	}
 }
 
-static err_t sigSign(const char* file_name, const char* sig_name, const char* key_name){
+static err_t sigSign(const char* file_name, const char* sig_file_name, const char* key_name){
 	octet key[64];
 	octet hash[64];
 	octet sig[96];
@@ -275,10 +275,10 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 
     memSetZero(hash,sizeof(hash));
 
-	if (sig_name){
+	if (sig_file_name){
 		end_padding = 0;
 	} else {
-		end_padding = sig_size;
+		end_padding = sig_size+1;
 	}
 
 	bsumHashFileExtended(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding);	
@@ -306,28 +306,29 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	if (error = bignSign(sig, &params, oid_der, oid_len,hash, key, brngCTRXStepR, brng_state) != ERR_OK)
 		return error;
 
-	if (sig_name) {
-        sig_file = fopen(sig_name, "wb");
+	if (sig_file_name) {
+        sig_file = fopen(sig_file_name, "wb");
         if (!sig_file) {
-            printf("%s: FAILED [open]\n", sig_name);
+            printf("%s: FAILED [open]\n", sig_file_name);
             return ERR_FILE_OPEN;
         }
     }
     else {
         sig_file = fopen(file_name, "a");
         if (!sig_file){
-            printf("%s: FAILED [open]\n", sig_name);
+            printf("%s: FAILED [open]\n", sig_file_name);
             return ERR_FILE_OPEN;
         }
     }
     fwrite(sig, 1, sig_size, sig_file);
+	fwrite(&sig_size, 1, 1, sig_file);
     fclose(sig_file);
-    printf("Sig saved to %s\n", sig_name ? sig_name : file_name);
+    printf("Sig saved to %s\n", sig_file_name ? sig_file_name : file_name);
 
 	return ERR_OK;
 }
 
-static err_t sigVfy(const char* file_name, const char* sig_name, const char* key_name) {
+static err_t sigVfy(const char* file_name, const char* sig_file_name, const char* key_name) {
 	octet key[128];
 	octet hash[64];
 	octet sig[96];
@@ -336,16 +337,15 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 	FILE* sig_file;
 	size_t key_size;
 	size_t sig_size;
-	size_t actual_sig_size;
 	bign_params params;
 	err_t error;
 	octet oid_der[128];
 	size_t oid_len;
 	size_t end_padding;
 	size_t file_size;
-	const char* file_with_sig_name;
+	const char* file_with_sig_file_name;
 
-	file_with_sig_name = sig_name ? sig_name : file_name;
+	file_with_sig_file_name = sig_file_name ? sig_file_name : file_name;
 
 	key_file = fopen(key_name, "rb");
 
@@ -356,10 +356,10 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 
 	key_size = fread(key,1, sizeof(key), key_file);
 	sig_size =  key_size*3/4;
-	if (sig_name){
+	if (sig_file_name){
 		end_padding = 0;
 	} else {
-		end_padding = sig_size;
+		end_padding = sig_size+1;
 	}
 
     bsumHashFileExtended(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding);
@@ -381,23 +381,21 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 		return error;
 
 
-	sig_file = fopen(file_with_sig_name, "rb");
+	sig_file = fopen(file_with_sig_file_name, "rb");
 	if (!sig_file){
-		printf("%s: FAILED [open]\n", file_with_sig_name);
+		printf("%s: FAILED [open]\n", file_with_sig_file_name);
 		return ERR_FILE_OPEN;
 	}
 
-	if (!sig_name){
+	if (!sig_file_name){
 		fseek(sig_file,0L,SEEK_END);
 		file_size = ftell(sig_file);
-		fseek(sig_file, file_size - sig_size, SEEK_SET);
+		fseek(sig_file, file_size - sig_size-1, SEEK_SET);
+
 	} 
 
-	actual_sig_size = fread(sig, 1, sizeof(sig), sig_file);
-	if (sig_size !=actual_sig_size){
-		printf("Incorrect sig length: %d. Must be %d\n", sig_size, sig_size);
-		return ERR_BAD_SIG;
-	}
+	fread(sig, 1, sig_size, sig_file);
+	
 
 	error = bignVerify(&params,oid_der,oid_len,hash, sig, key);
 	if (error == ERR_OK)
@@ -406,65 +404,32 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
     return error;
 }
 
-
-static err_t generate_test_keys(){
-
-	bign_params params;
-	err_t error;
-	octet priv_key[64];
-	octet pub_key[128];
-	octet brng_state[1024];
-	FILE* f;
-
-	memSetZero(priv_key, sizeof(priv_key));
-	memSetZero(pub_key, sizeof(pub_key));
-
-	ASSERT(sizeof(brng_state) >= brngCTRX_keep());
-
-	int l = 256;
-	int priv_key_size = l/4;
-	int pub_key_size = l/2;
-	char* pub_name = "public3";
-	char* priv_name = "private3";
-	char* curve = sigCurveName(l);
-
-	if (error = bignStdParams(&params, curve) != ERR_OK)
-		return error;
-	if (error = bignValParams(&params) != ERR_OK)
-		return error;
-
-	brngCTRXStart(beltH() + 128, beltH() + 128 + 64,
-	    beltH(), 8 * 32, brng_state);
-
-	if (error = bignGenKeypair(priv_key,pub_key, &params,brngCTRXStepR, brng_state) != ERR_OK)
-		return error;
-	if (error = bignValKeypair(&params,priv_key, pub_key) != ERR_OK)
-		return error;
-	f = fopen(pub_name,"wb");
-	fwrite(pub_key, 1, pub_key_size,f);
-	fclose(f);
-	f = fopen(priv_name,"wb");
-	fwrite(priv_key,1, priv_key_size,f);
-	fclose(f);
-	
-	return ERR_OK;
-}
-
-
-static err_t sigPrint(char* sig_name){
+static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 	octet sig[96];
-	char hex_sig[96*2];
+	char hex_sig[96*2+1];
 	size_t sig_len;
+	u8 sig_len_bytes;
+	size_t file_size;
 	FILE* sig_file;
 
-	sig_file = fopen(sig_name, "rb");
+	sig_file = fopen(sig_file_name, "rb");
 	if (!sig_file){
-		printf("%s: FAILED [open]\n", sig_name);
+		printf("%s: FAILED [open]\n", sig_file_name);
 		return ERR_FILE_OPEN;
 	}
-	
-	sig_len = fread(sig, 1, 96, sig_file);
 
+	if (is_binary){
+		fseek(sig_file,0L,SEEK_END);
+		file_size = ftell(sig_file);
+		fseek(sig_file, file_size-1, SEEK_SET);
+		fread(&sig_len_bytes, 1, 1, sig_file);
+		sig_len = sig_len_bytes;
+		fseek(sig_file, file_size - sig_len - 1, SEEK_SET);	
+		fread(sig,1, sig_len, sig_file);
+	} else {
+		sig_len = fread(sig, 1, sizeof(sig), sig_file);
+	}
+	
 	hexFrom(hex_sig,sig,sig_len);
 	
 	printf(hex_sig);
@@ -474,7 +439,7 @@ static err_t sigPrint(char* sig_name){
 static int sigMain(int argc, char* argv[]){
 	err_t code;
 	const char* key_name;
-	const char* sig_name;
+	const char* sig_file_name;
 	cmd_t cmd;
 	// справка
 	if (argc < 3)
@@ -489,9 +454,9 @@ static int sigMain(int argc, char* argv[]){
 			printf("%s argument is required", ARG_KEY);
 			return ERR_CMD_PARAMS; 
 		}
-		sig_name = findArg(argc, argv, ARG_SIG_FILE);
+		sig_file_name = findArg(argc, argv, ARG_SIG_FILE);
 	
-		if (!sig_name && !has_arg(argc, argv, ARG_EXEC)){
+		if (!sig_file_name && !has_arg(argc, argv, ARG_EXEC)){
 			printf("One of arguments %s, %s is required", ARG_SIG_FILE, ARG_EXEC);
 			return ERR_CMD_PARAMS;
 		}
@@ -500,13 +465,13 @@ static int sigMain(int argc, char* argv[]){
 	switch (cmd)
 	{
 	case COMMAND_SIGN:
-		code = sigSign(argv[argc-1],sig_name, key_name);
+		code = sigSign(argv[argc-1],sig_file_name, key_name);
 		break;
 	case COMMAND_VFY:
-		code = sigVfy(argv[argc-1], sig_name, key_name);
+		code = sigVfy(argv[argc-1], sig_file_name, key_name);
 		break;
 	case COMMAND_PRINT:
-		code = sigPrint(argv[argc-1]);
+		code = sigPrint(argv[argc-1], findArg(argc, argv, ARG_EXEC) != NULL);
 		break;
 	default:
 		return sigUsage();
@@ -515,6 +480,5 @@ static int sigMain(int argc, char* argv[]){
 }
 
 err_t sigInit(){
-    generate_test_keys();
 	return cmdReg(_name, _descr, sigMain);
 }
