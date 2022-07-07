@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <bee2/crypto/bash.h>
 #include <bee2/crypto/bign.h>
@@ -48,7 +49,71 @@
 static const char _name[] = "sig";
 static const char _descr[] = "make and verify digital signature";
 
-extern int bsumHashFile(octet hash[], size_t hid, const char* filename);
+int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigned endPadding)
+{
+
+	size_t file_size;
+	size_t total_readed;
+	bool_t eof_reached;
+	FILE* fp;
+	octet state[4096];
+	octet buf[4096];
+	size_t count;
+	// открыть файл
+	fp = fopen(filename, "rb");
+
+
+	if (!fp)
+	{
+		printf("%s: FAILED [open]\n", filename);
+		return -1;
+	}
+
+	if (endPadding > 0){
+		fseek(fp,0L,SEEK_END);
+		file_size = ftell(fp);
+		rewind(fp);
+	} else {
+		file_size = 0;
+	}
+	
+	total_readed = 0;
+	eof_reached = FALSE;
+
+	// хэшировать
+	ASSERT(beltHash_keep() <= sizeof(state));
+	ASSERT(bashHash_keep() <= sizeof(state));
+	hid ? bashHashStart(state, hid / 2) : beltHashStart(state);
+	while (!eof_reached)
+	{
+		count = fread(buf, 1, sizeof(buf), fp);
+
+		if (endPadding > 0 && total_readed + count > file_size - endPadding){
+			count = total_readed + count - file_size - endPadding;
+			eof_reached = TRUE;
+		}
+		printf("eend p is %d, count is %d\n", endPadding, count);
+
+		if (count == 0)
+		{
+			if (ferror(fp))
+			{
+				fclose(fp);
+				printf("%s: FAILED [read]\n", filename);
+				return -1;
+			}
+			break;
+		}
+		hid ? bashHashStepH(buf, count, state) : 
+			beltHashStepH(buf, count, state);
+
+		total_readed +=count;
+	}
+	// завершить
+	fclose(fp);
+	hid ? bashHashStepG(hash, hid / 8, state) : beltHashStepG(hash, state);
+	return 0;
+}
 
 bool_t has_arg(int argc,const char* argv[], const char* arg){
 	for (int i = 0; i< argc; i++){
@@ -186,6 +251,8 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	octet key[64];
 	octet hash[64];
 	octet sig[96];
+	size_t sig_size;
+	size_t end_padding;
 	const char* curve;
 	FILE* key_file;
 	FILE* sig_file;
@@ -195,6 +262,8 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	octet oid_der[128];
 	size_t oid_len;
 	octet brng_state[1024];
+	char* append_command[1024];
+	size_t append_command_offset;
 
 	ASSERT(sizeof(brng_state) >= brngCTRX_keep());
 
@@ -205,10 +274,20 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 		return ERR_FILE_OPEN;
 	}
 	key_size = fread(key,1, sizeof(key), key_file);
+	sig_size = key_size*3/2;
+
 	fclose(key_file);
 
     memSetZero(hash,sizeof(hash));
-	bsumHashFile(hash, key_size == 32 ? 0 : key_size*8, file_name);
+
+	printf("sig file is %s\n",sig_file);
+	if (sig_file){
+		end_padding = 0;
+	} else {
+		end_padding = sig_size;
+	}
+
+	bsumHashFileExtended(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding);	
 	
 	curve = sigCurveName(key_size*4);
 	if (curve == NULL){
@@ -233,20 +312,36 @@ static err_t sigSign(const char* file_name, const char* sig_name, const char* ke
 	if (error = bignSign(sig, &params, oid_der, oid_len,hash, key, brngCTRXStepR, brng_state) != ERR_OK)
 		return error;
 
-	if (sig_name == NULL){
-		printf("Not implemented\n");
-		return ERR_OK;
+	if (sig_name){
+		// запись подпииси в отдельный файл
+		sig_file = fopen(sig_name, "wb");
+		if (!sig_file){
+			printf("%s: FAILED [open]\n", sig_name);
+			return ERR_FILE_OPEN;
+		}
+
+		fwrite(sig, 1, sig_size, sig_file);
+		fclose(sig_file);
+		printf("Sig saved to %s\n",sig_name);
+	} else {
+		//запись подписи в конец исполняемого файла;
+		sprintf(append_command,"echo ");
+		append_command_offset = sizeof("echo ")-1;
+		for (int i = 0; i< sig_size; i++){
+			append_command[append_command_offset+i] = sig[i];
+		}
+		append_command_offset += sig_size;
+
+		sprintf(append_command + append_command_offset, " >> %s", file_name);
+
+		printf(append_command);
+	
+		system(append_command);
+		printf("Sig saved to signed executable - %s\n",sig_name);
+
 	}
 
-	sig_file = fopen(sig_name, "wb");
-	if (!sig_file){
-		printf("%s: FAILED [open]\n", sig_name);
-		return ERR_FILE_OPEN;
-	}
-
-	fwrite(sig, 1, key_size*3/2, sig_file);
-	fclose(sig_file);
-	printf("Sig saved to %s\n",sig_name);
+	
 	return ERR_OK;
 }
 
@@ -259,19 +354,34 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 	FILE* sig_file;
 	size_t key_size;
 	size_t sig_size;
+	size_t actual_sig_size;
 	bign_params params;
 	err_t error;
 	octet oid_der[128];
 	size_t oid_len;
-	
+	size_t end_padding;
+	size_t file_size;
+	const char* file_with_sig_name;
+
+	file_with_sig_name = sig_name ? sig_name : file_name;
+
 	key_file = fopen(key_name, "rb");
 
 	if (!key_file){
 		printf("%s: FAILED [open]\n", key_name);
 		return ERR_FILE_OPEN;
 	}
+
 	key_size = fread(key,1, sizeof(key), key_file);
-    bsumHashFile(hash, key_size == 64 ? 0 : key_size*4, file_name);
+	sig_size =  key_size*3/4;
+	if (sig_file){
+		end_padding = 0;
+	} else {
+		end_padding = sig_size;
+	}
+
+    bsumHashFileExtended(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding);
+
 	curve = sigCurveName(key_size*2);
 	if (curve == NULL){
 		printf("FAILED: error key size : %d", key_size*8);
@@ -288,15 +398,22 @@ static err_t sigVfy(const char* file_name, const char* sig_name, const char* key
 	if (error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*2)) != ERR_OK)
 		return error;
 
-	sig_file = fopen(sig_name, "rb");
+
+	sig_file = fopen(file_with_sig_name, "rb");
 	if (!sig_file){
-		printf("%s: FAILED [open]\n", sig_name);
+		printf("%s: FAILED [open]\n", file_with_sig_name);
 		return ERR_FILE_OPEN;
 	}
 
-	sig_size = fread(sig, 1, sizeof(sig), sig_file);
-	if (sig_size != key_size*3/4){
-		printf("Incorrect sig length: %d. Must be %d\n", sig_size, key_size *3/4);
+	if (!sig_name){
+		fseek(sig_file,0L,SEEK_END);
+		file_size = ftell(sig_file);
+		fseek(sig_file, file_size - sig_size, SEEK_SET);
+	} 
+
+	actual_sig_size = fread(sig, 1, sizeof(sig), sig_file);
+	if (sig_size !=actual_sig_size){
+		printf("Incorrect sig length: %d. Must be %d\n", sig_size, sig_size);
 		return ERR_BAD_SIG;
 	}
 
@@ -380,11 +497,10 @@ static int sigMain(int argc, char* argv[]){
 	const char* key_name;
 	const char* sig_name;
 	const char* file_name;
+	cmd_t cmd;
 	// справка
 	if (argc < 3)
 		return sigUsage();
-
-    cmd_t cmd;
 
     cmd = get_command(argv[1]);
 
@@ -396,6 +512,7 @@ static int sigMain(int argc, char* argv[]){
 			return ERR_CMD_PARAMS; 
 		}
 		sig_name = findArg(argc, argv, ARG_SIG_FILE);
+	
 		if (!sig_name && !has_arg(argc, argv, ARG_EXEC)){
 			printf("One of arguments %s, %s is requred", ARG_SIG_FILE, ARG_EXEC);
 			return ERR_CMD_PARAMS;
