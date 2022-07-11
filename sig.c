@@ -7,6 +7,7 @@
 #include <bee2/core/err.h>
 #include <bee2/core/util.h>
 #include "bee2/core/mem.h"
+#include <bee2/core/rng.h>
 #include "../cmd.h"
 #include "bee2/crypto/belt.h"
 #include "bee2/core/hex.h"
@@ -49,6 +50,24 @@
 static const char _name[] = "sig";
 static const char _descr[] = "make and verify digital signature";
 
+static int sigUsage()
+{
+	printf(
+		"bee2cmd/%s: %s\n"
+		"Usage:\n"
+		"  sig sign [--executable] [-s <sig_file_name>] -k <private_key> <file_name>\n"
+		"    sign <file_name> with <private_key> and write signature to <sig_file_name>"
+        "    if file is not executable or embed it otherwise\n"
+		"  sig vfy [--executable] [-s <sig_file_name>] -k <public_key> <file_name>\n"
+		"    verify signature of <file_name>, that is stored in <sig_file_name> if file"
+        "    is not executable and embeded otherwice\n"
+		"  sig print [--executable] <file_with_signature>\n"
+		"    print the signature\n",
+		_name, _descr
+	);
+	return -1;
+}
+
 cmd_t getCommand(const char* arg) {
     if (!arg){
         return COMMAND_UNKNOWN;
@@ -76,75 +95,6 @@ const char* findArgument(int argc,char* argv[], const char *argName){
     return NULL;
 }
 
-typedef struct
-{
-	const octet* X;		/*< дополнительное слово */
-	size_t count;		/*< размер X в октетах */
-	size_t offset;		/*< текущее смещение в X */
-	octet state_ex[];	/*< состояние brngCTR */
-} brng_ctrx_st;
-
-static size_t brngCTRX_keep()
-{
-	return sizeof(brng_ctrx_st) + brngCTR_keep();
-}
-
-static void brngCTRXStart(const octet key[32], const octet iv[32],
-	const void* X, size_t count, void* state)
-{
-	brng_ctrx_st* s = (brng_ctrx_st*)state;
-	ASSERT(memIsValid(s, sizeof(brng_ctrx_st)));
-	ASSERT(count > 0);
-	ASSERT(memIsValid(s->state_ex, brngCTR_keep()));
-	brngCTRStart(s->state_ex, key, iv);
-	s->X = (const octet*)X;
-	s->count = count;
-	s->offset = 0;
-}
-
-static void brngCTRXStepR(void* buf, size_t count, void* stack)
-{
-	brng_ctrx_st* s = (brng_ctrx_st*)stack;
-	octet* buf1 = (octet*)buf;
-	size_t count1 = count;
-	ASSERT(memIsValid(s, sizeof(brng_ctrx_st)));
-	// заполнить buf
-	while (count1)
-		if (count1 < s->count - s->offset)
-		{
-			memCopy(buf1, s->X + s->offset, count1);
-			s->offset += count1;
-			count1 = 0;
-		}
-		else
-		{
-			memCopy(buf1, s->X + s->offset, s->count - s->offset);
-			buf1 += s->count - s->offset;
-			count1 -= s->count - s->offset;
-			s->offset = 0;
-		}
-	// сгенерировать
-	brngCTRStepR(buf, count, s->state_ex);
-}
-
-static int sigUsage()
-{
-	printf(
-		"bee2cmd/%s: %s\n"
-		"Usage:\n"
-		"  sig sign [--executable] [-s <sig_file_name>] -k <private_key> <file_name>\n"
-		"    sign <file_name> with <private_key> and write signature to <sig_file_name>"
-        "    if file is not executable or embed it otherwise\n"
-		"  sig vfy [--executable] [-s <sig_file_name>] -k <public_key> <file_name>\n"
-		"    verify signature of <file_name>, that is stored in <sig_file_name> if file"
-        "    is not executable and embeded otherwice\n"
-		"  sig print [--executable] <file_with_signature>\n"
-		"    print the signature\n",
-		_name, _descr
-	);
-	return -1;
-}
-
 static const char* sigCurveName(size_t hid){
 	switch (hid)
 	{
@@ -159,7 +109,7 @@ static const char* sigCurveName(size_t hid){
 	}
 }
 
-static const char* sigHashAlgIdentifier(size_t hid){
+const char* sigHashAlgIdentifier(size_t hid){
 	switch (hid)
 	{
 	case 128:
@@ -250,9 +200,8 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	err_t error;
 	octet oid_der[128];
 	size_t oid_len;
-	octet brng_state[1024];
-
-	ASSERT(sizeof(brng_state) >= brngCTRX_keep());
+	octet* t;
+	size_t t_len;
 
 	key_file = fopen(key_name, "rb");
 
@@ -273,7 +222,10 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 		end_padding = sig_size+1;
 	}
 
-	bsumHashFileExtended(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding);	
+	if (bsumHashFileExtended(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding) != 0){
+		printf("An error occured while hashing the file\n");
+		return ERR_BAD_HASH;
+	}	
 	
 	curve = sigCurveName(key_size*4);
 	if (curve == NULL){
@@ -281,23 +233,26 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 		return ERR_BAD_PRIVKEY;
 	}
 
-	if (error = bignStdParams(&params, curve) != ERR_OK)
-		return error;
-	if (error = bignValParams(&params) != ERR_OK)
-		return error;
+	error = bignStdParams(&params, curve);
+	ERR_CALL_CHECK(error);
+
+	error = bignValParams(&params);
+	ERR_CALL_CHECK(error);
+
 
 	oid_len = sizeof(oid_der);
-	if (error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*4)) != ERR_OK)
-		return error;
-
-	brngCTRXStart(beltH() + 128, beltH() + 128 + 64,
-	    beltH(), 8 * 32, brng_state);
+	error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*4));
+	ERR_CALL_CHECK(error);
 
     memSetZero(sig,sizeof(sig));
 
+	if (rngIsValid())
+		rngStepR(t, t_len = key_size, 0);
+	else
+		t_len = 0;
 
-	if (error = bignSign(sig, &params, oid_der, oid_len,hash, key, brngCTRXStepR, brng_state) != ERR_OK)
-		return error;
+	error = bignSign2(sig, &params, oid_der, oid_len,hash, key, t, t_len);
+	ERR_CALL_CHECK(error);
 
 	if (sig_file_name) {
         sig_file = fopen(sig_file_name, "wb");
@@ -355,7 +310,10 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 		end_padding = sig_size+1;
 	}
 
-    bsumHashFileExtended(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding);
+	if (bsumHashFileExtended(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding) != 0){
+		printf("An error occured while hashing the file\n");
+		return ERR_BAD_HASH;
+	}
 
 	curve = sigCurveName(key_size*2);
 	if (curve == NULL){
@@ -363,16 +321,15 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 		return ERR_BAD_PUBKEY;
 	}
 
-	if (error = bignStdParams(&params, curve) != ERR_OK)
-		return error;
+	error = bignStdParams(&params, curve);
+	ERR_CALL_CHECK(error);
 
-	if (error = bignValParams(&params) != ERR_OK)
-		return error;
+	error = bignValParams(&params);
+	ERR_CALL_CHECK(error);
 
 	oid_len = sizeof(oid_der);
-	if (error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*2)) != ERR_OK)
-		return error;
-
+	error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*2));
+	ERR_CALL_CHECK(error);
 
 	sig_file = fopen(file_with_sig_file_name, "rb");
 	if (!sig_file){
@@ -384,13 +341,12 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 		fseek(sig_file,0L,SEEK_END);
 		file_size = ftell(sig_file);
 		fseek(sig_file, file_size - sig_size-1, SEEK_SET);
-
 	} 
 
 	fread(sig, 1, sig_size, sig_file);
 	
-
 	error = bignVerify(&params,oid_der,oid_len,hash, sig, key);
+
 	if (error == ERR_OK)
 		printf("Correct\n");
 	else printf("Incorrect. Code: %d", error);
@@ -428,8 +384,8 @@ static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 	}
 	
 	hexFrom(hex_sig,sig,sig_len);
-	
-	printf(hex_sig);
+
+	printf("%s", hex_sig);
 	return ERR_OK;
 }
 
