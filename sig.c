@@ -50,25 +50,27 @@
 static const char _name[] = "sig";
 static const char _descr[] = "make and verify digital signature";
 
-static int sigUsage()
-{
+static int sigUsage(){
 	printf(
-		"bee2cmd/%s: %s\n"
-		"Usage:\n"
-		"  sig sign [--executable] [-s <sig_file_name>] -k <private_key> <file_name>\n"
-		"    sign <file_name> with <private_key> and write signature to <sig_file_name>"
-        "    if file is not executable or embed it otherwise\n"
-		"  sig vfy [--executable] [-s <sig_file_name>] -k <public_key> <file_name>\n"
-		"    verify signature of <file_name>, that is stored in <sig_file_name> if file"
-        "    is not executable and embeded otherwice\n"
-		"  sig print [--executable] <file_with_signature>\n"
-		"    print the signature\n",
-		_name, _descr
+ 		"bee2cmd/%s: %s\n"
+ 		"Usage:\n"
+ 		"  sig sign [--executable] [-s <sig_name>] -k <private_key> <file_name>\n"
+ 		"    sign <file_name> with <private_key> and write signature to <sig_name>"
+ 		"  sig sign [--executable] [-s <sig_file_name>] -k <private_key> <file_name>\n"
+ 		"    sign <file_name> with <private_key> and write signature to <sig_file_name>"
+         "    if file is not executable or embed it otherwise\n"
+ 		"  sig vfy [--executable] [-s <sig_name>] -k <public_key> <file_name>\n"
+ 		"    verify signature of <file_name>, that is stored in <sig_name> if file"
+ 		"  sig vfy [--executable] [-s <sig_file_name>] -k <public_key> <file_name>\n"
+ 		"    verify signature of <file_name>, that is stored in <sig_file_name> if file"
+         "    is not executable and embeded otherwice\n"
+ 		"  sig print [--executable] <file_with_signature>\n"
+ 		"    print the signature\n", _name, _descr
 	);
 	return -1;
 }
 
-cmd_t getCommand(const char* arg) {
+static cmd_t getCommand(const char* arg) {
     if (!arg){
         return COMMAND_UNKNOWN;
     }
@@ -95,7 +97,7 @@ const char* findArgument(int argc,char* argv[], const char *argName){
     return NULL;
 }
 
-static const char* sigCurveName(size_t hid){
+const char* sigCurveName(size_t hid){
 	switch (hid)
 	{
 	case 128:
@@ -123,7 +125,7 @@ const char* sigHashAlgIdentifier(size_t hid){
 	}
 }
 
-int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigned endPadding)
+int bsumHashFileWithEndPadding(octet hash[], size_t hid, const char* filename, unsigned endPadding)
 {
 	size_t file_size;
 	size_t total_readed;
@@ -134,7 +136,6 @@ int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigne
 	size_t count;
 	// открыть файл
 	fp = fopen(filename, "rb");
-
 
 	if (!fp)
 	{
@@ -178,7 +179,7 @@ int bsumHashFileExtended(octet hash[], size_t hid, const char* filename, unsigne
 		hid ? bashHashStepH(buf, count, state) : 
 			beltHashStepH(buf, count, state);
 
-		total_readed +=count;
+		total_readed += count;
 	}
 	// завершить
 	fclose(fp);
@@ -222,7 +223,7 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 		end_padding = sig_size+1;
 	}
 
-	if (bsumHashFileExtended(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding) != 0){
+	if (bsumHashFileWithEndPadding(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding) != 0){
 		printf("An error occured while hashing the file\n");
 		return ERR_BAD_HASH;
 	}	
@@ -310,7 +311,7 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 		end_padding = sig_size+1;
 	}
 
-	if (bsumHashFileExtended(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding) != 0){
+	if (bsumHashFileWithEndPadding(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding) != 0){
 		printf("An error occured while hashing the file\n");
 		return ERR_BAD_HASH;
 	}
