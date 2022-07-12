@@ -51,15 +51,18 @@ static int sigUsage(){
 	printf(
  		"bee2cmd/%s: %s\n"
  		"Usage:\n"
- 		"  sig sign [--executable] [-s <sig_name>] -k <private_key> <file_name>\n"
+ 		"  %s %s [%s] [%s <sig_name>] %s <private_key> <file_name>\n"
  		"    sign <file_name> with <private_key> and write signature to <sig_name>"
-        "    if file is not executable or embed it otherwise\n"
- 		"  sig vfy [--executable] [-s <sig_name>] -k <public_key> <file_name>\n"
+        " if file is not executable or embed it to the end of file otherwise\n"
+ 		"  %s %s [%s] [%s <sig_name>] %s <public_key> <file_name>\n"
  		"    verify signature of <file_name>, that is stored in <sig_name> if file"
-        "    is not executable and embedded otherwice\n"
- 		"  sig print [--executable] <file_with_signature>\n"
- 		"    print the signature\n", 
-		_name, _descr
+        " is not executable and embedded otherwice\n"
+ 		"  %s %s [%s] <file_with_signature>\n"
+ 		"    print the signature to the console\n", 
+		_name, _descr,
+		_name, ARG_SIGN, ARG_EXEC, ARG_SIG_FILE, ARG_KEY,
+		_name, ARG_VFY, ARG_EXEC, ARG_SIG_FILE, ARG_KEY,
+		_name, ARG_PRINT, ARG_EXEC
 	);
 	return -1;
 }
@@ -197,6 +200,17 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	size_t oid_len;
 	octet* t;
 	size_t t_len;
+	bool_t is_embedded;
+	const char* file_with_sig_name;
+	const char* open_mode;
+
+	is_embedded = sig_file_name != NULL;
+	file_with_sig_name = is_embedded ? sig_file_name : file_name;
+	open_mode = is_embedded ? "wb" : "a";
+
+	if (!key_name){
+		return ERR_KEY_NOT_FOUND;
+	}
 
 	key_file = fopen(key_name, "rb");
 
@@ -211,10 +225,14 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 
     memSetZero(hash,sizeof(hash));
 
-	if (sig_file_name){
+	if (is_embedded){
 		end_padding = 0;
 	} else {
 		end_padding = sig_size+1;
+	}
+
+	if (!file_name){
+		return ERR_FILE_NOT_FOUND;
 	}
 
 	if (bsumHashFileWithEndPadding(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding) != 0){
@@ -223,7 +241,7 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	}	
 	
 	curve = sigCurveName(key_size*4);
-	if (curve == NULL){
+	if (!curve){
 		printf("FAILED: incorrect key size: %lu\n", key_size * 8);
 		return ERR_BAD_PRIVKEY;
 	}
@@ -248,22 +266,17 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	error = bignSign2(sig, &params, oid_der, oid_len,hash, key, t, t_len);
 	ERR_CALL_CHECK(error);
 
-	if (sig_file_name) {
-        sig_file = fopen(sig_file_name, "wb");
-        if (!sig_file) {
-            printf("%s: FAILED [open]\n", sig_file_name);
-            return ERR_FILE_OPEN;
-        }
-    }
-    else {
-        sig_file = fopen(file_name, "a");
-        if (!sig_file){
-            printf("%s: FAILED [open]\n", file_name);
-            return ERR_FILE_OPEN;
-        }
-    }
+	sig_file = fopen(file_with_sig_name, open_mode);
+	if (!sig_file) {
+		printf("%s: FAILED [open]\n", sig_file_name);
+		return ERR_FILE_OPEN;
+	}
+	
+	//записать подпись
     fwrite(sig, 1, sig_size, sig_file);
-	fwrite(&sig_size, 1, 1, sig_file);
+	//если подпись встроенная, записать ее размер (для возможности печати)
+	if (!sig_file_name)
+		fwrite(&sig_size, 1, 1, sig_file);
     fclose(sig_file);
     printf("SUCCESS: signature saved to %s\n", sig_file_name ? sig_file_name : file_name);
 
@@ -285,9 +298,15 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 	size_t oid_len;
 	size_t end_padding;
 	size_t file_size;
-	const char* file_with_sig_file_name;
+	bool_t is_embedded;
+	const char* file_with_sig_name;
 
-	file_with_sig_file_name = sig_file_name ? sig_file_name : file_name;
+	is_embedded = sig_file_name != NULL;
+	file_with_sig_name = is_embedded ? sig_file_name : file_name;
+
+	if (!key_name){
+		return ERR_KEY_NOT_FOUND;
+	}
 
 	key_file = fopen(key_name, "rb");
 
@@ -297,11 +316,16 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 	}
 
 	key_size = fread(key,1, sizeof(key), key_file);
-	sig_size =  key_size*3/4;
-	if (sig_file_name){
+	sig_size = key_size*3/4;
+
+	if (is_embedded){
 		end_padding = 0;
 	} else {
 		end_padding = sig_size+1;
+	}
+
+	if (!file_name){
+		return ERR_FILE_NOT_FOUND;
 	}
 
 	if (bsumHashFileWithEndPadding(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding) != 0){
@@ -310,7 +334,7 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 	}
 
 	curve = sigCurveName(key_size*2);
-	if (curve == NULL){
+	if (!curve){
 		printf("FAILED: incorrect key size : %lu\n", key_size*8);
 		return ERR_BAD_PUBKEY;
 	}
@@ -325,9 +349,9 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 	error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*2));
 	ERR_CALL_CHECK(error);
 
-	sig_file = fopen(file_with_sig_file_name, "rb");
+	sig_file = fopen(file_with_sig_name, "rb");
 	if (!sig_file){
-		printf("%s: FAILED [open]\n", file_with_sig_file_name);
+		printf("%s: FAILED [open]\n", file_with_sig_name);
 		return ERR_FILE_OPEN;
 	}
 
@@ -355,6 +379,10 @@ static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 	u8 sig_len_bytes;
 	size_t file_size;
 	FILE* sig_file;
+
+	if (!sig_file_name){
+		return ERR_FILE_NOT_FOUND;
+	}
 
 	sig_file = fopen(sig_file_name, "rb");
 	if (!sig_file){
