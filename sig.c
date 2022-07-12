@@ -1,16 +1,13 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <bee2/crypto/bash.h>
+#include <bee2/crypto/belt.h>
 #include <bee2/crypto/bign.h>
-#include <bee2/crypto/brng.h>
 #include <bee2/core/err.h>
 #include <bee2/core/util.h>
-#include "bee2/core/mem.h"
+#include <bee2/core/mem.h>
 #include <bee2/core/rng.h>
+#include <bee2/core/hex.h>
 #include "../cmd.h"
-#include "bee2/crypto/belt.h"
-#include "bee2/core/hex.h"
 
 #define cmd_t octet
 
@@ -48,7 +45,7 @@
 */
 
 static const char _name[] = "sig";
-static const char _descr[] = "make and verify digital signature";
+static const char _descr[] = "sign and verify files";
 
 static int sigUsage(){
 	printf(
@@ -56,16 +53,13 @@ static int sigUsage(){
  		"Usage:\n"
  		"  sig sign [--executable] [-s <sig_name>] -k <private_key> <file_name>\n"
  		"    sign <file_name> with <private_key> and write signature to <sig_name>"
- 		"  sig sign [--executable] [-s <sig_file_name>] -k <private_key> <file_name>\n"
- 		"    sign <file_name> with <private_key> and write signature to <sig_file_name>"
-         "    if file is not executable or embed it otherwise\n"
+        "    if file is not executable or embed it otherwise\n"
  		"  sig vfy [--executable] [-s <sig_name>] -k <public_key> <file_name>\n"
  		"    verify signature of <file_name>, that is stored in <sig_name> if file"
- 		"  sig vfy [--executable] [-s <sig_file_name>] -k <public_key> <file_name>\n"
- 		"    verify signature of <file_name>, that is stored in <sig_file_name> if file"
-         "    is not executable and embeded otherwice\n"
+        "    is not executable and embedded otherwice\n"
  		"  sig print [--executable] <file_with_signature>\n"
- 		"    print the signature\n", _name, _descr
+ 		"    print the signature\n", 
+		_name, _descr
 	);
 	return -1;
 }
@@ -224,13 +218,13 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	}
 
 	if (bsumHashFileWithEndPadding(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding) != 0){
-		printf("An error occured while hashing the file\n");
+		printf("FAILED: an error occured while hashing the file\n");
 		return ERR_BAD_HASH;
 	}	
 	
 	curve = sigCurveName(key_size*4);
 	if (curve == NULL){
-		printf("FAILED: error key size: %lu", key_size * 8);
+		printf("FAILED: incorrect key size: %lu\n", key_size * 8);
 		return ERR_BAD_PRIVKEY;
 	}
 
@@ -239,7 +233,6 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 
 	error = bignValParams(&params);
 	ERR_CALL_CHECK(error);
-
 
 	oid_len = sizeof(oid_der);
 	error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*4));
@@ -272,7 +265,7 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
     fwrite(sig, 1, sig_size, sig_file);
 	fwrite(&sig_size, 1, 1, sig_file);
     fclose(sig_file);
-    printf("Sig saved to %s\n", sig_file_name ? sig_file_name : file_name);
+    printf("SUCCESS: signature saved to %s\n", sig_file_name ? sig_file_name : file_name);
 
 	return ERR_OK;
 }
@@ -312,13 +305,13 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 	}
 
 	if (bsumHashFileWithEndPadding(hash, key_size == 64 ? 0 : key_size*4, file_name, end_padding) != 0){
-		printf("An error occured while hashing the file\n");
+		printf("FAILED: an error occured while hashing the file\n");
 		return ERR_BAD_HASH;
 	}
 
 	curve = sigCurveName(key_size*2);
 	if (curve == NULL){
-		printf("FAILED: error key size : %lu", key_size*8);
+		printf("FAILED: incorrect key size : %lu\n", key_size*8);
 		return ERR_BAD_PUBKEY;
 	}
 
@@ -349,8 +342,9 @@ static err_t sigVfy(const char* file_name, const char* sig_file_name, const char
 	error = bignVerify(&params,oid_der,oid_len,hash, sig, key);
 
 	if (error == ERR_OK)
-		printf("Correct\n");
-	else printf("Incorrect. Code: %d", error);
+		printf("SUCCESS: signature is correct\n");
+	else printf("FAILED: %s", errMsg(error));
+
     return error;
 }
 
@@ -375,7 +369,7 @@ static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 		fread(&sig_len_bytes, 1, 1, sig_file);
 		sig_len = sig_len_bytes;
 		if (sig_len >96) {
-			printf("Executable file doesn't have signature or sig length is not correct;");
+			printf("FAILED: executable file doesn't have signature or sig length is not correct\n");
 			return ERR_BAD_SIG;
 		}
 		fseek(sig_file, file_size - sig_len - 1, SEEK_SET);	
@@ -386,7 +380,7 @@ static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 	
 	hexFrom(hex_sig,sig,sig_len);
 
-	printf("%s", hex_sig);
+	printf("Signature: %s\n", hex_sig);
 	return ERR_OK;
 }
 
@@ -401,17 +395,16 @@ static int sigMain(int argc, char* argv[]){
 
     cmd = getCommand(argv[1]);
 
-
 	if (cmd == COMMAND_SIGN || cmd == COMMAND_VFY){
 		key_name = findArgument(argc,argv, ARG_KEY);
 		if (!key_name){
-			printf("%s argument is required", ARG_KEY);
+			printf("%s argument is required\n", ARG_KEY);
 			return ERR_CMD_PARAMS; 
 		}
 		sig_file_name = findArgument(argc, argv, ARG_SIG_FILE);
 	
 		if (!sig_file_name && !findArgument(argc, argv, ARG_EXEC)){
-			printf("One of arguments %s, %s is required", ARG_SIG_FILE, ARG_EXEC);
+			printf("One of arguments [%s, %s] is required\n", ARG_SIG_FILE, ARG_EXEC);
 			return ERR_CMD_PARAMS;
 		}
 	}
