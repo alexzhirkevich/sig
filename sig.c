@@ -2,16 +2,25 @@
 #include <bee2/crypto/bash.h>
 #include <bee2/crypto/belt.h>
 #include <bee2/crypto/bign.h>
+#include <bee2/crypto/btok.h>
 #include <bee2/core/err.h>
+#include <bee2/core/der.h>
+#include <bee2/core/blob.h>
 #include <bee2/core/util.h>
 #include <bee2/core/mem.h>
 #include <bee2/core/rng.h>
 #include <bee2/core/hex.h>
 #include "../cmd.h"
 
+#define SIG_MAX_CERTS 16
+
 #define cmd_t octet
 
-#define ARG_KEY "-k"
+#define ARG_CERT "-cert"
+#define ARG_ANCHOR "-anchor"
+#define ARG_PASS "-pass"
+#define ARG_PRIVKEY "-privkey"
+#define ARG_PUBKEY "-pubkey"
 #define ARG_SIG_FILE "-s"
 #define ARG_EXEC "--executable"
 #define ARG_VFY "vfy"
@@ -47,24 +56,151 @@
 static const char _name[] = "sig";
 static const char _descr[] = "sign and verify files";
 
+typedef struct {
+    octet sig[96];	                 /* подпись */
+    size_t sig_len;	                 /* длина подписи в октетах */
+    size_t certs_cnt;				     /* количество сертификатов */
+    size_t certs_len[SIG_MAX_CERTS];   /* длины сертификатов */
+} cmd_sig_t;
+
+typedef struct
+{
+	octet cert[1024];
+	size_t cert_len;
+} cert_data;
+
+typedef struct{
+	octet sig[96];
+	size_t sig_len;
+	bool_t has_cert;
+} sig_data;
+
 static int sigUsage(){
 	printf(
  		"bee2cmd/%s: %s\n"
  		"Usage:\n"
- 		"  %s %s [%s] [%s <sig_name>] %s <private_key> <file_name>\n"
- 		"    sign <file_name> with <private_key> and write signature to <sig_name>"
-        " if file is not executable or embed it to the end of file otherwise\n"
- 		"  %s %s [%s] [%s <sig_name>] %s <public_key> <file_name>\n"
- 		"    verify signature of <file_name>, that is stored in <sig_name> if file"
-        " is not executable and embedded otherwice\n"
- 		"  %s %s [%s] <file_with_signature>\n"
- 		"    print the signature to the console\n", 
+ 		"  %s %s  [%s <certa,certb,...,cert> ] [%s <scheme>] <privkey> <file> <sig>\n"
+ 		"    sign <file> using <privkey> and write signature to <sig>\n"
+		"  options:\n"
+		"    %s <certa,certb,...,cert> -- certeficate sequence (optional)\n"
+		"    %s <scheme> -- scheme of the private key password\n"
+ 		"  %s %s [%s <pubkey> | %s <anchor>] <file> <sig>\n"
+ 		"    verify <file> signature stored in <sig>"
+		"  options:\n"
+		"    %s <pibkey> -- verification public key\n"
+		"    %s <anchor> -- trusted certificate"
+ 		"  %s %s [%s <cert>] <sig>\n"
+ 		"    print <sig> to the console\n"
+		"  options:\n"
+		"    %s <cert> -- file to save certeficate (if signature contains it)\n"
+		, 
 		_name, _descr,
-		_name, ARG_SIGN, ARG_EXEC, ARG_SIG_FILE, ARG_KEY,
-		_name, ARG_VFY, ARG_EXEC, ARG_SIG_FILE, ARG_KEY,
-		_name, ARG_PRINT, ARG_EXEC
+		_name, ARG_SIGN, ARG_CERT, ARG_PASS,
+						 ARG_CERT, ARG_PASS,
+		_name, ARG_VFY, ARG_PUBKEY, ARG_ANCHOR,
+						ARG_PUBKEY, ARG_ANCHOR,
+		_name, ARG_PRINT, ARG_CERT, ARG_CERT
 	);
 	return -1;
+}
+
+
+/*
+*******************************************************************************
+Подпись
+
+  SEQ[APPLICATION 78] Signature
+    SIZE[APPLICATION 41] -- sig_len
+    SIZE[APPLICATION 42] -- cert_cnt
+    OCT(APPLICATION 37)(SIZE(96)) -- sig
+    OCT[APPLICATION 73](SIZE(sizeof(size_t) * SIG_MAX_CERT)) - cert_len
+    SEQ[APPLICATION 75] Cert
+      OCT - cert[i]
+*******************************************************************************
+*/
+
+#define derEncStep(step, ptr, count)\
+do {\
+	size_t t = step;\
+	ASSERT(t != SIZE_MAX);\
+	ptr = ptr ? ptr + t : 0;\
+	count += t;\
+} while(0)\
+
+#define derDecStep(step, ptr, count)\
+do {\
+	size_t t = step;\
+	if (t == SIZE_MAX)\
+		return SIZE_MAX;\
+	ptr += t, count -= t;\
+} while(0)\
+
+static size_t sigEnc(octet buf[], cmd_sig_t* sig, octet* certs[]) {
+
+    der_anchor_t Signature[1];
+    der_anchor_t Certs[1];
+
+    size_t count = 0;
+
+    if (!memIsValid(sig, sizeof(cmd_sig_t)))
+        return ERR_BAD_SIG;
+
+    for (int i = 0; i < sig->certs_cnt; i++) {
+        if (!memIsValid(certs[i], sig->certs_len[i])) {
+            return ERR_BAD_CERT;
+        }
+    }
+    derEncStep(derTSEQEncStart(Signature, buf, count, 0x7F4E), buf, count);
+    
+    derEncStep(derTSIZEEnc(buf, 0x5F29, sig->sig_len), buf, count);
+    derEncStep(derTSIZEEnc(buf, 0x5F2A, sig->certs_cnt), buf, count);
+
+    derEncStep(derOCTEnc(buf, sig->certs_len, sizeof(size_t) * SIG_MAX_CERTS), buf, count);
+
+    derEncStep(derTSEQEncStart(Certs, buf, count, 0x7F4B), buf, count);
+    for (int i = 0; i < sig->sig_len;i++){
+        derOCTEnc(buf, certs[i], sig->certs_len[i]);
+    }
+    derEncStep(derTSEQEncStop(buf, count, Certs), buf, count);
+    derEncStep(derTSEQEncStop(buf, count, Signature), buf,count);
+
+    return count;
+}
+
+static size_t sigDec(octet der[], size_t count, cmd_sig_t* sig, octet* certs[]){
+
+    if (!memIsValid(sig, sizeof(cmd_sig_t))){
+        return ERR_OUTOFRANGE;
+    }
+
+    der_anchor_t Signature[1];
+    der_anchor_t CertLen[1];
+    der_anchor_t Certs[1];
+    octet *ptr = der;
+
+    derDecStep(derTSEQDecStart(Signature, ptr, count, 0x7F4E), ptr, count);
+
+    derDecStep(derTSIZEDec(&sig->sig_len,ptr,count, 0x5F29), ptr, count);
+    derDecStep(derTSIZEDec(&sig->certs_cnt,ptr,count, 0x5F2A), ptr, count);
+
+    derDecStep(derOCTDec2((octet *) sig->certs_len, ptr, count, sizeof(size_t) * SIG_MAX_CERTS), ptr, count);
+
+    derDecStep(derTSEQDecStart(CertLen, ptr, count, 0x7F49), ptr, count);
+    for (int i = 0; i < sig->sig_len;i++){
+        derDecStep(derSIZEDec(&sig->certs_len[i], ptr, count),ptr,count);
+    }
+
+    derDecStep(derTSEQDecStart(Certs, ptr, count, 0x7F4B), ptr, count);
+    for (int i = 0; i < sig->sig_len;i++){
+        if (!memIsValid(certs[i], sig->certs_len[i])){
+            return ERR_OUTOFRANGE;
+        }
+        derDecStep(derOCTDec2(certs[i],ptr, count, sig->certs_len[i]), ptr, count);
+    }
+    derDecStep(derTSEQDecStop(ptr, Certs), ptr, count);
+    derDecStep(derTSEQEncStop(ptr, count, Signature), ptr, count);
+
+    return ptr - der;
 }
 
 static cmd_t getCommand(const char* arg) {
@@ -184,11 +320,73 @@ int bsumHashFileWithEndPadding(octet hash[], size_t hid, const char* filename, u
 	return 0;
 }
 
-static err_t sigSign(const char* file_name, const char* sig_file_name, const char* key_name){
+err_t cvcRead(octet* cvc, size_t* cert_len, const char* cert_file_name){
+	err_t code;
+	void* state;
+	octet* cert;
+	char* hex;
+	if (!cmdFileValExist(1, &cert_file_name))
+		return ERR_FILE_NOT_FOUND;
+	if (*cert_len = cmdFileSize(cert_file_name) == SIZE_MAX)
+		return ERR_FILE_READ;
+	if (*cert_len > 512)
+		return ERR_BAD_FORMAT;
+
+	state = blobCreate(*cert_len + sizeof(btok_cvc_t) + 2 * 128 + 1);
+	if (!state)
+		return ERR_OUTOFMEMORY;
+	cert = (octet*)state;
+	ASSERT(memIsValid(cvc, *cert_len));
+		
+	FILE* fp;
+	code = (fp = fopen(cert_file_name, "rb")) ? ERR_OK : ERR_FILE_OPEN;
+	ERR_CALL_HANDLE(code, blobClose(state));
+	*cert_len = fread(cert, 1, *cert_len, fp);
+	fclose(fp);
+	ERR_CALL_HANDLE(code, blobClose(state));
+
+	ERR_CALL_HANDLE(code, blobClose(state));
+	blobClose(state);
+	
+	return ERR_OK;
+}
+
+// err_t cvcWrite(btok_cvc_t* cvc, const char* cert_file_name, octet* privkey, size_t privkey_len){
+// 	err_t code;
+// 	size_t cert_len;
+// 	octet cert[512 + sizeof(btok_cvc_t) + 257];
+// 	FILE* fp;
+
+// 	ASSERT(memIsValid(cvc, sizeof(btok_cvc_t)));
+	
+// 	btokCVCWrap(cert, &cert_len, cvc, privkey, privkey_len);
+// 	ERR_CALL_CHECK(code);
+
+// 	if (!cert_file_name){
+// 		return ERR_FILE_CREATE;
+// 	}
+
+// 	code = (fp = fopen(cert_file_name, "wb")) ? ERR_OK : ERR_FILE_CREATE;
+// 	ERR_CALL_CHECK(code);
+	
+// 	fwrite(cert, 1, cert_len, fp);
+// 	fclose(fp);
+// 	ERR_CALL_CHECK(code);
+
+// 	return ERR_OK;
+// }
+
+static err_t sigSign(
+	const char* file_name, 
+	const char* sig_file_name, 
+	const char* pass_sheme, 
+	const char* pk_container_name,
+	const char* cert_file_name
+	){
 	octet key[64];
 	octet hash[64];
-	octet sig[96];
-	size_t sig_size;
+	// octet sig[96];
+	// size_t sig_len;
 	size_t end_padding;
 	const char* curve;
 	FILE* key_file;
@@ -201,41 +399,48 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	octet* t;
 	size_t t_len;
 	bool_t is_embedded;
+	cmd_pwd_t pwd = 0;
+	btok_cvc_t cvc;
+	sig_data s_data;
+	cert_data c_data;
 	const char* file_with_sig_name;
 	const char* open_mode;
 
-	is_embedded = sig_file_name != NULL;
+	is_embedded = sig_file_name == NULL;
 	file_with_sig_name = is_embedded ? sig_file_name : file_name;
 	open_mode = is_embedded ? "wb" : "a";
 
-	if (!key_name){
+	if (!pass_sheme){
 		return ERR_KEY_NOT_FOUND;
 	}
 
-	key_file = fopen(key_name, "rb");
+	error = cmdPwdRead(pwd,pass_sheme);
+	ASSERT(cmdPwdIsValid(pwd));
+	ERR_CALL_HANDLE(error, cmdPwdClose(pwd));
 
-	if (!key_file){
-		printf("%s: FAILED [open]\n", key_name);
-		return ERR_FILE_OPEN;
+	if (!pk_container_name){
+		return ERR_KEY_NOT_FOUND;
 	}
-	key_size = fread(key,1, sizeof(key), key_file);
-	sig_size = key_size*3/2;
+	error = cmdPrivkeyRead(key, &key_size, pk_container_name, pwd);
+	ERR_CALL_HANDLE(error, cmdPwdClose(pwd));
+
+	s_data.has_cert = cert_file_name != NULL;
+	if (s_data.has_cert){
+		error = cvcRead(c_data.cert, &c_data.cert_len, cert_file_name);
+		ERR_CALL_HANDLE(error, cmdPwdClose(pwd));
+	}
+
+	s_data.sig_len = key_size*3/2;
 
 	fclose(key_file);
 
     memSetZero(hash,sizeof(hash));
 
-	if (is_embedded){
-		end_padding = 0;
-	} else {
-		end_padding = sig_size+1;
-	}
-
 	if (!file_name){
 		return ERR_FILE_NOT_FOUND;
 	}
 
-	if (bsumHashFileWithEndPadding(hash, key_size == 32 ? 0 : key_size*8, file_name, end_padding) != 0){
+	if (bsumHashFileWithEndPadding(hash, key_size == 32 ? 0 : key_size*8, file_name, 0) != 0){
 		printf("FAILED: an error occured while hashing the file\n");
 		return ERR_BAD_HASH;
 	}	
@@ -256,14 +461,14 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 	error = bignOidToDER(oid_der, &oid_len, sigHashAlgIdentifier(key_size*4));
 	ERR_CALL_CHECK(error);
 
-    memSetZero(sig,sizeof(sig));
+    memSetZero(s_data.sig, sizeof(s_data.sig));
 
 	if (rngIsValid())
 		rngStepR(t, t_len = key_size, 0);
 	else
 		t_len = 0;
 
-	error = bignSign2(sig, &params, oid_der, oid_len,hash, key, t, t_len);
+	error = bignSign2(s_data.sig, &params, oid_der, oid_len,hash, key, t, t_len);
 	ERR_CALL_CHECK(error);
 
 	sig_file = fopen(file_with_sig_name, open_mode);
@@ -271,14 +476,31 @@ static err_t sigSign(const char* file_name, const char* sig_file_name, const cha
 		printf("%s: FAILED [open]\n", sig_file_name);
 		return ERR_FILE_OPEN;
 	}
+
+	// if (cert_file_name){
+
+	// 	size_t cert_len;
+	// 	octet cert[512 + sizeof(btok_cvc_t) + 257];
+		
+	// 	memCopy(cvc.sig, sig, sizeof(sig));
+	// 	cvc.sig_len = sig_len;
+		
+	// 	error = btokCVCWrap(cert, &cert_len, &cvc, key, key_size);
+	// 	ERR_CALL_CHECK(error);
+		
+	// 	memCopy(s_data.cert, cert,cert_len);
+	// 	s_data.cert_len = cert_len;
 	
-	//записать подпись
-    fwrite(sig, 1, sig_size, sig_file);
-	//если подпись встроенная, записать ее размер (для возможности печати)
-	if (!sig_file_name)
-		fwrite(&sig_size, 1, 1, sig_file);
-    fclose(sig_file);
-    printf("SUCCESS: signature saved to %s\n", sig_file_name ? sig_file_name : file_name);
+	// } else {
+
+	if (s_data.has_cert){
+		fwrite(&c_data, sizeof(cert_data), 1, sig_file);
+	}
+	fwrite(&s_data, sizeof(sig_data), 1, sig_file);
+	// }
+	fclose(sig_file);
+
+    printf("SUCCESS: %s saved to %s\n", cert_file_name ? "certificate with signature" : "signature", file_with_sig_name);
 
 	return ERR_OK;
 }
@@ -424,9 +646,9 @@ static int sigMain(int argc, char* argv[]){
     cmd = getCommand(argv[1]);
 
 	if (cmd == COMMAND_SIGN || cmd == COMMAND_VFY){
-		key_name = findArgument(argc,argv, ARG_KEY);
+		key_name = findArgument(argc,argv, ARG_PASS);
 		if (!key_name){
-			printf("%s argument is required\n", ARG_KEY);
+			printf("%s argument is required\n", ARG_PASS);
 			return ERR_CMD_PARAMS; 
 		}
 		sig_file_name = findArgument(argc, argv, ARG_SIG_FILE);
@@ -440,7 +662,7 @@ static int sigMain(int argc, char* argv[]){
 	switch (cmd)
 	{
 	case COMMAND_SIGN:
-		code = sigSign(argv[argc-1],sig_file_name, key_name);
+		code = sigSign(argv[argc-1],sig_file_name, key_name, 0,0);
 		break;
 	case COMMAND_VFY:
 		code = sigVfy(argv[argc-1], sig_file_name, key_name);
