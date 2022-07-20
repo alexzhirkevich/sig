@@ -11,10 +11,12 @@
 #include <bee2/core/rng.h>
 #include <bee2/core/hex.h>
 #include "../cmd.h"
+#include "bee2/core/prng.h"
+#include "bee2/core/str.h"
 
 #define SIG_MAX_CERTS 16
+#define CERTS_DELIM ','
 
-#define cmd_t octet
 
 #define ARG_CERT "-cert"
 #define ARG_ANCHOR "-anchor"
@@ -27,10 +29,10 @@
 #define ARG_SIGN "sign"
 #define ARG_PRINT "print"
 
-#define COMMAND_UNKNOWN (cmd_t)0
-#define COMMAND_VFY (cmd_t)1
-#define COMMAND_SIGN (cmd_t)2
-#define COMMAND_PRINT (cmd_t)3
+#define COMMAND_UNKNOWN 0
+#define COMMAND_VFY 1
+#define COMMAND_SIGN 2
+#define COMMAND_PRINT 3
 
 /*
 *******************************************************************************
@@ -53,6 +55,8 @@
 *******************************************************************************
 */
 
+extern err_t cmdCVCRead(octet cert[], size_t* cert_len, const char* file);
+
 static const char _name[] = "sig";
 static const char _descr[] = "sign and verify files";
 
@@ -74,6 +78,9 @@ typedef struct{
 	size_t sig_len;
 	bool_t has_cert;
 } sig_data;
+
+
+#pragma region Справка по использованию
 
 static int sigUsage(){
 	printf(
@@ -104,10 +111,14 @@ static int sigUsage(){
 	return -1;
 }
 
+#pragma endregion
+
+
+#pragma region Кодирование подписи
 
 /*
 *******************************************************************************
-Подпись
+Кодирование подписи
 
   SEQ[APPLICATION 78] Signature
     SIZE[APPLICATION 41] -- sig_len
@@ -143,73 +154,162 @@ static size_t sigEnc(octet buf[], cmd_sig_t* sig, octet* certs[]) {
     size_t count = 0;
 
     if (!memIsValid(sig, sizeof(cmd_sig_t)))
-        return ERR_BAD_SIG;
+        return SIZE_MAX;
 
-    for (int i = 0; i < sig->certs_cnt; i++) {
+    for (size_t i = 0; i < sig->certs_cnt; i++) {
         if (!memIsValid(certs[i], sig->certs_len[i])) {
-            return ERR_BAD_CERT;
+            return SIZE_MAX;
         }
     }
+
     derEncStep(derTSEQEncStart(Signature, buf, count, 0x7F4E), buf, count);
     
     derEncStep(derTSIZEEnc(buf, 0x5F29, sig->sig_len), buf, count);
+    derEncStep(derOCTEnc(buf, sig->sig,sig->sig_len), buf, count);
+
     derEncStep(derTSIZEEnc(buf, 0x5F2A, sig->certs_cnt), buf, count);
 
     derEncStep(derOCTEnc(buf, sig->certs_len, sizeof(size_t) * SIG_MAX_CERTS), buf, count);
 
     derEncStep(derTSEQEncStart(Certs, buf, count, 0x7F4B), buf, count);
-    for (int i = 0; i < sig->sig_len;i++){
-        derOCTEnc(buf, certs[i], sig->certs_len[i]);
+    for (size_t i = 0; i < sig->certs_cnt;i++){
+        derEncStep(derOCTEnc(buf, certs[i], sig->certs_len[i]), buf, count);
     }
     derEncStep(derTSEQEncStop(buf, count, Certs), buf, count);
     derEncStep(derTSEQEncStop(buf, count, Signature), buf,count);
+
+    ASSERT(derIsValid(buf,count));
 
     return count;
 }
 
 static size_t sigDec(octet der[], size_t count, cmd_sig_t* sig, octet* certs[]){
 
-    if (!memIsValid(sig, sizeof(cmd_sig_t))){
-        return ERR_OUTOFRANGE;
-    }
-
     der_anchor_t Signature[1];
-    der_anchor_t CertLen[1];
     der_anchor_t Certs[1];
     octet *ptr = der;
+
+    if (!derIsValid(der, count)){
+        return SIZE_MAX;
+    }
+
+    if (!memIsNullOrValid(sig, sizeof(cmd_sig_t))){
+        return SIZE_MAX;
+    }
 
     derDecStep(derTSEQDecStart(Signature, ptr, count, 0x7F4E), ptr, count);
 
     derDecStep(derTSIZEDec(&sig->sig_len,ptr,count, 0x5F29), ptr, count);
+    derDecStep(derOCTDec2(sig->sig, ptr, count ,sig->sig_len), ptr, count);
+
     derDecStep(derTSIZEDec(&sig->certs_cnt,ptr,count, 0x5F2A), ptr, count);
 
-    derDecStep(derOCTDec2((octet *) sig->certs_len, ptr, count, sizeof(size_t) * SIG_MAX_CERTS), ptr, count);
-
-    derDecStep(derTSEQDecStart(CertLen, ptr, count, 0x7F49), ptr, count);
-    for (int i = 0; i < sig->sig_len;i++){
-        derDecStep(derSIZEDec(&sig->certs_len[i], ptr, count),ptr,count);
-    }
+    derDecStep(derOCTDec2((octet*)sig->certs_len, ptr, count, sizeof(size_t) * SIG_MAX_CERTS), ptr, count);
 
     derDecStep(derTSEQDecStart(Certs, ptr, count, 0x7F4B), ptr, count);
-    for (int i = 0; i < sig->sig_len;i++){
+    for (size_t i = 0; i < sig->certs_cnt;i++){
         if (!memIsValid(certs[i], sig->certs_len[i])){
-            return ERR_OUTOFRANGE;
+            return SIZE_MAX;
         }
         derDecStep(derOCTDec2(certs[i],ptr, count, sig->certs_len[i]), ptr, count);
     }
     derDecStep(derTSEQDecStop(ptr, Certs), ptr, count);
-    derDecStep(derTSEQEncStop(ptr, count, Signature), ptr, count);
+    derDecStep(derTSEQDecStop(ptr, Signature), ptr, count);
 
     return ptr - der;
 }
 
-static cmd_t getCommand(const char* arg) {
+#pragma endregion
+
+
+#pragma region Читение/запись подписи
+
+
+/*
+*******************************************************************************
+ Чтение подписи из файла
+*******************************************************************************
+*/
+
+err_t cmdSigRead(cmd_sig_t* sig, octet** certs, char* file){
+
+    ASSERT(memIsNullOrValid(sig, sizeof (cmd_sig_t)));
+
+    FILE* fp;
+    size_t der_count;
+    char *files[] = { file };
+    octet * buf = 0;
+
+    ERR_CALL_CHECK(cmdFileValExist(1, files));
+    fp = fopen(file, "rb");
+
+
+    fseek(fp, - (signed)sizeof (size_t), SEEK_END);
+    fread(&der_count, sizeof(size_t), 1, fp);
+
+    buf = (octet*) blobCreate(der_count);
+
+    if (!buf){
+        return ERR_OUTOFMEMORY;
+    }
+
+    fseek(fp, - (signed)(der_count - sizeof(size_t)), SEEK_CUR);
+
+    if (!derIsValid(buf, der_count)) {
+        blobClose(buf);
+        return ERR_BAD_SIG;
+    }
+
+    if (sigDec(buf, der_count, sig, certs) == SIZE_MAX){
+        return ERR_BAD_SIG;
+    }
+
+    return ERR_OK;
+}
+
+/*
+*******************************************************************************
+ Запись подписи в файл
+
+ Подпись читается с конца, поэтому может быть дописана в непустой файл
+ (при указании append = TRUE)
+*******************************************************************************
+*/
+err_t cmdSigWrite(cmd_sig_t* sig, octet** certs, const char* file, bool_t append){
+
+    size_t count;
+    octet der[SIG_MAX_CERTS * (512 + 128) + 96 + 16];
+    FILE* fp;
+
+    count = sigEnc(der, sig, certs);
+    fp = fopen(file, append ? "a" : "wb");
+
+    if (!fp){
+        return ERR_FILE_OPEN;
+    }
+
+    if (fwrite(der, 1, count, fp) != count){
+        return ERR_OUTOFMEMORY;
+    }
+    fwrite(&count, sizeof(size_t), 1, fp);
+    fclose(fp);
+
+    return ERR_OK;
+}
+
+#pragma endregion
+
+
+
+#pragma region Разбор опций командной строки
+
+static char getCommand(const char* arg) {
     if (!arg){
         return COMMAND_UNKNOWN;
     }
 
     const char* args[]      = {ARG_VFY,       ARG_SIGN,       ARG_PRINT };
-    const cmd_t commands[]  = {COMMAND_VFY,   COMMAND_SIGN,   COMMAND_PRINT};
+    const char commands[]  = {COMMAND_VFY, COMMAND_SIGN, COMMAND_PRINT};
     const int count = 3;
     for (int i =0; i<count; i++){
         if (strcmp(arg, args[i])==0){
@@ -229,6 +329,202 @@ const char* findArgument(int argc,char* argv[], const char *argName){
 
     return NULL;
 }
+
+/*
+*******************************************************************************
+ Разбор опций командной строки
+
+ Опции возвращаются по адресам
+ privkey [privkey_len],
+ pubkey [pubkey_len],
+ anchor_cert [anchor_cert_len],
+ file, sig_file,
+ sig
+ certs [certs_count]
+ certs_lens [certs_count]
+ Любой из адресов может бытьнулевым, и тогда соответствующая опция не возвращается.
+ Более того, ее указаниев командной строке считается ошибкой.
+
+ В случае успеха по адресу readc возвращается число обработанных аргументов.
+*******************************************************************************
+*/
+
+static err_t sigParseOptions(
+        int argc,
+        char** argv,
+        octet* privkey,
+        size_t * privkey_len,
+        octet* pubkey,
+        size_t * pubkey_len,
+        octet* anchor_cert,
+        size_t* anchor_cert_len,
+        char* file,
+        char* sig_file,
+        cmd_sig_t * sig,
+        octet** certs,
+        size_t* certs_lens,
+        size_t* certs_count
+        ){
+
+    cmd_pwd_t pwd;
+    bool_t pwd_provided = FALSE;
+
+    char cmd = getCommand(argv[0]);
+    if (cmd == COMMAND_UNKNOWN)
+        return ERR_CMD_PARAMS;
+
+    if (cmd == COMMAND_VFY &&
+        !findArgument(argc, argv, ARG_PUBKEY) &&
+        !findArgument(argc, argv, ARG_ANCHOR)){
+        return ERR_BAD_INPUT;
+    }
+
+    while (argc >0 && strStartsWith(*argv, "-")){
+
+        if (argc < 2){
+            return ERR_CMD_PARAMS;
+        }
+
+        // прочитать схему личного ключа
+        if (strEq(*argv, ARG_PASS)){
+            cmdPwdRead(&pwd, argv[1]);
+            pwd_provided = TRUE;
+        }
+
+        // прочитать доверенный сертификат
+        if (strEq(*argv, ARG_ANCHOR)) {
+            if (!anchor_cert){
+                return ERR_CMD_PARAMS;
+            }
+            ASSERT(memIsValid(anchor_cert_len, sizeof(size_t)));
+
+            cmdCVCRead(anchor_cert, anchor_cert_len, argv[1]);
+        }
+
+        // прочитать открытый ключ
+        if (strEq(*argv, ARG_PUBKEY)){
+            if (!pubkey){
+                return ERR_CMD_PARAMS;
+            }
+            ASSERT(memIsValid(pubkey_len, sizeof(size_t)));
+
+            FILE* fp = fopen(argv[1], "rb");
+            if (!fp){
+                printf("ERROR: failed to open public key file '%s'", argv[1]);
+                return ERR_FILE_OPEN;
+            }
+            *pubkey_len = fread(pubkey, 1, 128, fp);
+            fclose(fp);
+        }
+
+
+        // прочитать сертификаты
+        if (strEq(*argv, ARG_CERT)) {
+            if (!certs) {
+                return ERR_CMD_PARAMS;
+            }
+            ASSERT(memIsValid(certs_count, sizeof(size_t)));
+
+            char* m_certs = argv[1];
+
+            *certs_count = 0;
+            bool_t stop = FALSE;
+            while (!stop){
+                size_t i = 0;
+                for (; m_certs[i] != '\0' && m_certs[i] != CERTS_DELIM; i++);
+                if (m_certs[i] == '\0')
+                    stop = TRUE;
+                else
+                    m_certs[i] = '\0';
+                cmdCVCRead(certs[*certs_count], certs_lens + *certs_count, m_certs);
+                m_certs += i+1;
+                *certs_count++;
+            }
+        }
+
+        argc -= 2;
+        argv += 2;
+    }
+
+    switch (cmd) {
+        case COMMAND_SIGN:
+            if (argc != 3) {
+                return ERR_CMD_PARAMS;
+            }
+
+            //прочитать личный ключ
+            if (privkey == NULL){
+                return ERR_CMD_PARAMS;
+            }
+            ASSERT(memIsValid(privkey_len, sizeof (size_t)));
+
+            //если схема пароля не предоставлена, личный ключ читается как открытый
+            if (pwd_provided){
+                cmdPrivkeyRead(privkey, privkey_len, argv[0], pwd);
+            } else {
+                FILE *fp = fopen(argv[0],"rb");
+                if (!fp){
+                    printf("ERROR: failed to open public key file '%s'", argv[0]);
+                    return ERR_FILE_OPEN;
+                }
+                *privkey_len = fread(privkey, 1, 64, fp);
+                fclose(fp);
+            }
+
+            //прочитать имя подписываемого файла
+            ASSERT(memIsValid(file, strlen(argv[1])));
+            memCopy(file, argv[1], strLen(argv[1]));
+
+            //прочитать имя файла c подписью
+            ASSERT(memIsValid(sig_file, strlen(argv[20])));
+            memCopy(sig_file, argv[2], strLen(argv[2]));
+
+            break;
+        case COMMAND_VFY:
+            if (argc != 2){
+                return ERR_CMD_PARAMS;
+            }
+
+            //прочитать имя подписанного файла
+            ASSERT(memIsValid(file, strlen(argv[0])));
+            memCopy(file, argv[0], strLen(argv[0]));
+
+            //прочитать имя файла c подписью
+            ASSERT(memIsValid(sig_file, strlen(argv[1])));
+            memCopy(sig_file, argv[1], strLen(argv[1]));
+
+            // прочитать подпись
+            if (sig && certs) {
+                ERR_CALL_CHECK(cmdSigRead(sig, certs, sig_file));
+            }
+
+        case COMMAND_PRINT:
+            if (argc != 1){
+                return ERR_CMD_PARAMS;
+            }
+
+            if (!sig_file){
+                return ERR_CMD_PARAMS;
+            }
+
+            // прочитать имя файла c подписью
+            ASSERT(memIsValid(sig_file, strlen(argv[0])));
+            memCopy(sig_file, argv[0], strLen(argv[0]));
+
+            // прочитать подпись
+            if (sig && certs){
+                ERR_CALL_CHECK(cmdSigRead(sig, certs, sig_file));
+            }
+        default:
+            break;
+    }
+
+    return ERR_OK;
+}
+
+#pragma  endregion
+
+
 
 const char* sigCurveName(size_t hid){
 	switch (hid)
@@ -320,37 +616,6 @@ int bsumHashFileWithEndPadding(octet hash[], size_t hid, const char* filename, u
 	return 0;
 }
 
-err_t cvcRead(octet* cvc, size_t* cert_len, const char* cert_file_name){
-	err_t code;
-	void* state;
-	octet* cert;
-	char* hex;
-	if (!cmdFileValExist(1, &cert_file_name))
-		return ERR_FILE_NOT_FOUND;
-	if (*cert_len = cmdFileSize(cert_file_name) == SIZE_MAX)
-		return ERR_FILE_READ;
-	if (*cert_len > 512)
-		return ERR_BAD_FORMAT;
-
-	state = blobCreate(*cert_len + sizeof(btok_cvc_t) + 2 * 128 + 1);
-	if (!state)
-		return ERR_OUTOFMEMORY;
-	cert = (octet*)state;
-	ASSERT(memIsValid(cvc, *cert_len));
-		
-	FILE* fp;
-	code = (fp = fopen(cert_file_name, "rb")) ? ERR_OK : ERR_FILE_OPEN;
-	ERR_CALL_HANDLE(code, blobClose(state));
-	*cert_len = fread(cert, 1, *cert_len, fp);
-	fclose(fp);
-	ERR_CALL_HANDLE(code, blobClose(state));
-
-	ERR_CALL_HANDLE(code, blobClose(state));
-	blobClose(state);
-	
-	return ERR_OK;
-}
-
 // err_t cvcWrite(btok_cvc_t* cvc, const char* cert_file_name, octet* privkey, size_t privkey_len){
 // 	err_t code;
 // 	size_t cert_len;
@@ -376,7 +641,17 @@ err_t cvcRead(octet* cvc, size_t* cert_len, const char* cert_file_name){
 // 	return ERR_OK;
 // }
 
-static err_t sigSign(
+
+
+
+static err_t sigSign(int argc, char* argv[]){
+
+    char* file_name;
+    char* sig_file_name;
+
+}
+
+static err_t sigSign2(
 	const char* file_name, 
 	const char* sig_file_name, 
 	const char* pass_sheme, 
@@ -426,7 +701,7 @@ static err_t sigSign(
 
 	s_data.has_cert = cert_file_name != NULL;
 	if (s_data.has_cert){
-		error = cvcRead(c_data.cert, &c_data.cert_len, cert_file_name);
+		error = cmdCVCRead(c_data.cert, &c_data.cert_len, cert_file_name);
 		ERR_CALL_HANDLE(error, cmdPwdClose(pwd));
 	}
 
@@ -634,48 +909,149 @@ static err_t sigPrint(char* sig_file_name, bool_t is_binary){
 	return ERR_OK;
 }
 
+
+static err_t sigSelfTest(){
+    octet cert1[1024];
+    octet cert1_dec[1024];
+    octet cert2[1024];
+    octet cert2_dec[1024];
+
+    size_t der_len;
+    octet der[4096];
+
+    cmd_sig_t cmd_sig[1];
+    cmd_sig_t cmd_sig_dec[1];
+
+    octet state[1024];
+    bign_params params[1];
+    octet privkey[32];
+    octet pubkey[64];
+    octet hash[32];
+    const octet oid[] = {
+            0x06, 0x09, 0x2A, 0x70, 0x00, 0x02, 0x00, 0x22, 0x65, 0x1F, 0x51,
+    };
+    octet sig[48];
+    // bign-genkeypair
+    hexTo(privkey,
+          "1F66B5B84B7339674533F0329C74F218"
+          "34281FED0732429E0C79235FC273E269");
+    ASSERT(sizeof(state) >= prngEcho_keep());
+    prngEchoStart(state, privkey, 32);
+    if (bignStdParams(params, "1.2.112.0.2.0.34.101.45.3.1") != ERR_OK ||
+        bignGenKeypair(privkey, pubkey, params, prngEchoStepR,
+                       state) != ERR_OK ||
+        !hexEq(pubkey,
+               "BD1A5650179D79E03FCEE49D4C2BD5DD"
+               "F54CE46D0CF11E4FF87BF7A890857FD0"
+               "7AC6A60361E8C8173491686D461B2826"
+               "190C2EDA5909054A9AB84D2AB9D99A90"))
+        return ERR_SELFTEST;
+    // bign-valpubkey
+    if (bignValPubkey(params, pubkey) != ERR_OK)
+        return ERR_SELFTEST;
+    // bign-sign
+    if (beltHash(hash, beltH(), 13) != ERR_OK)
+        return ERR_SELFTEST;
+    if (bignSign2(sig, params, oid, sizeof(oid), hash, privkey,
+                  0, 0) != ERR_OK)
+        return ERR_SELFTEST;
+    if (!hexEq(sig,
+               "19D32B7E01E25BAE4A70EB6BCA42602C"
+               "CA6A13944451BCC5D4C54CFD8737619C"
+               "328B8A58FB9C68FD17D569F7D06495FB"))
+        return ERR_SELFTEST;
+    if (bignVerify(params, oid, sizeof(oid), hash, sig, pubkey) != ERR_OK)
+        return ERR_SELFTEST;
+    sig[0] ^= 1;
+    if (bignVerify(params, oid, sizeof(oid), hash, sig, pubkey) == ERR_OK)
+        return ERR_SELFTEST;
+
+    memSetZero(cmd_sig->sig, 96);
+    memSetZero(cmd_sig_dec->sig, 96);
+    for (int i = 0; i< SIG_MAX_CERTS; i++){
+        cmd_sig->certs_len[i] = 0;
+        cmd_sig_dec->certs_len[i] = 0;
+    }
+
+    if(cmdCVCRead(cert1, &cmd_sig->certs_len[0],"cert0") != ERR_OK)
+        return ERR_SELFTEST;
+    if(cmdCVCRead(cert2, &cmd_sig->certs_len[1],"cert1") != ERR_OK)
+        return ERR_SELFTEST;
+
+    memCopy(cmd_sig->sig,sig,sizeof (sig));
+    cmd_sig->sig_len = sizeof (sig);
+    cmd_sig->certs_cnt = 2;
+
+    octet *certs[]= {cert1, cert2};
+    octet *certs_dec[]= {cert1_dec, cert2_dec};
+
+    der_len = sigEnc(der, cmd_sig, certs);
+
+    if (der_len == SIZE_MAX)
+        return ERR_SELFTEST;
+
+    if (sigDec(der, der_len, cmd_sig_dec, certs_dec) == SIZE_MAX)
+        return ERR_SELFTEST;
+
+
+    ASSERT(memEq(cmd_sig->sig, cmd_sig_dec->sig, sizeof (sig)));
+    ASSERT(cmd_sig->sig_len ==cmd_sig_dec->sig_len);
+    ASSERT(cmd_sig->certs_cnt ==cmd_sig_dec->certs_cnt);
+    ASSERT(memEq(cert1, cert1_dec, cmd_sig->certs_len[0]));
+    ASSERT(memEq(cert2, cert2_dec, cmd_sig->certs_len[1]));
+
+    return ERR_OK;
+}
+
+
 static int sigMain(int argc, char* argv[]){
-	err_t code;
-	const char* key_name;
-	const char* sig_file_name;
-	cmd_t cmd;
-	// справка
-	if (argc < 3)
-		return sigUsage();
+
+    printf(errMsg(sigSelfTest()));
+    return 0;
+
+    err_t code;
+    const char* key_name;
+    const char* sig_file_name;
+    cmd_sig_command cmd;
+    // справка
+    if (argc < 3)
+        return sigUsage();
 
     cmd = getCommand(argv[1]);
 
-	if (cmd == COMMAND_SIGN || cmd == COMMAND_VFY){
-		key_name = findArgument(argc,argv, ARG_PASS);
-		if (!key_name){
-			printf("%s argument is required\n", ARG_PASS);
-			return ERR_CMD_PARAMS; 
-		}
-		sig_file_name = findArgument(argc, argv, ARG_SIG_FILE);
-	
-		if (!sig_file_name && !findArgument(argc, argv, ARG_EXEC)){
-			printf("One of arguments [%s, %s] is required\n", ARG_SIG_FILE, ARG_EXEC);
-			return ERR_CMD_PARAMS;
-		}
-	}
+    if (cmd == COMMAND_SIGN || cmd == COMMAND_VFY){
+        key_name = findArgument(argc,argv, ARG_PASS);
+        if (!key_name){
+            printf("%s argument is required\n", ARG_PASS);
+            return ERR_CMD_PARAMS;
+        }
+        sig_file_name = findArgument(argc, argv, ARG_SIG_FILE);
 
-	switch (cmd)
-	{
-	case COMMAND_SIGN:
-		code = sigSign(argv[argc-1],sig_file_name, key_name, 0,0);
-		break;
-	case COMMAND_VFY:
-		code = sigVfy(argv[argc-1], sig_file_name, key_name);
-		break;
-	case COMMAND_PRINT:
-		code = sigPrint(argv[argc-1], findArgument(argc, argv, ARG_EXEC) != NULL);
-		break;
-	default:
-		return sigUsage();
-	}
-	return (code == ERR_OK) ? 0 : -1;
+        if (!sig_file_name && !findArgument(argc, argv, ARG_EXEC)){
+            printf("One of arguments [%s, %s] is required\n", ARG_SIG_FILE, ARG_EXEC);
+            return ERR_CMD_PARAMS;
+        }
+    }
+
+
+
+    switch (cmd)
+    {
+        case COMMAND_SIGN:
+            code = sigSign(argv[argc-1],sig_file_name, key_name, 0,0);
+            break;
+        case COMMAND_VFY:
+            code = sigVfy(argv[argc-1], sig_file_name, key_name);
+            break;
+        case COMMAND_PRINT:
+            code = sigPrint(argv[argc-1], findArgument(argc, argv, ARG_EXEC) != NULL);
+            break;
+        default:
+            return sigUsage();
+    }
+    return (code == ERR_OK) ? 0 : -1;
 }
 
 err_t sigInit(){
-	return cmdReg(_name, _descr, sigMain);
+    return cmdReg(_name, _descr, sigMain);
 }
