@@ -92,32 +92,32 @@ static const char _descr[] = "sign and verify files";
 #pragma region Справка по использованию
 
 static int sigUsage(){
-	printf(
- 		"bee2cmd/%s: %s\n"
- 		"Usage:\n"
- 		"  %s %s [%s <certa,certb,...,cert> ] [%s <scheme>] <privkey> <file> <sig>\n"
- 		"    sign <file> using <privkey> and write signature to <sig>\n"
-		"  options:\n"
-		"    %s <certa,certb,...,cert> -- certeficate sequence (optional)\n"
-		"    %s <scheme> -- scheme of the private key password\n"
- 		"  %s %s [%s <pubkey> | %s <anchor>] <file> <sig>\n"
- 		"    verify <file> signature stored in <sig>\n"
-		"  options:\n"
-		"    %s <pibkey> -- verification public key\n"
-		"    %s <anchor> -- trusted certificate"
- 		"  %s %s [%s <save_certa,save_certb,...,save_cert>] <sig>\n"
- 		"    print <sig> to the console\n"
-		"  options:\n"
-		"    %s <ave_certa,save_certb,...,save_cert> -- files to save certeficates (if signature contains it)\n"
-		, 
-		_name, _descr,
-		_name, ARG_SIGN, ARG_CERT, ARG_PASS,
-						 ARG_CERT, ARG_PASS,
-		_name, ARG_VFY, ARG_PUBKEY, ARG_ANCHOR,
-						ARG_PUBKEY, ARG_ANCHOR,
-		_name, ARG_PRINT, ARG_CERT, ARG_CERT
-	);
-	return -1;
+    printf(
+            "bee2cmd/%s: %s\n"
+            "Usage:\n"
+            "  %s %s [%s <certa,certb,...,cert> ] [%s <scheme>] <privkey> <file> <sig>\n"
+            "    sign <file> using <privkey> and write signature to <sig>\n"
+            "  options:\n"
+            "    %s <certa,certb,...,cert> -- certeficate sequence (optional)\n"
+            "    %s <scheme> -- scheme of the private key password\n"
+            "  %s %s [%s <pubkey> | %s <anchor>] <file> <sig>\n"
+            "    verify <file> signature stored in <sig>\n"
+            "  options:\n"
+            "    %s <pibkey> -- verification public key\n"
+            "    %s <anchor> -- trusted certificate"
+            "  %s %s [%s <save_certa,save_certb,...,save_cert>] <sig>\n"
+            "    print <sig> to the console\n"
+            "  options:\n"
+            "    %s <ave_certa,save_certb,...,save_cert> -- files to save certeficates (if signature contains it)\n"
+            ,
+            _name, _descr,
+            _name, ARG_SIGN, ARG_CERT, ARG_PASS,
+            ARG_CERT, ARG_PASS,
+            _name, ARG_VFY, ARG_PUBKEY, ARG_ANCHOR,
+            ARG_PUBKEY, ARG_ANCHOR,
+            _name, ARG_PRINT, ARG_CERT, ARG_CERT
+    );
+    return -1;
 }
 
 #pragma endregion
@@ -173,7 +173,7 @@ static size_t sigEnc(octet buf[], cmd_sig_t* sig, octet certs[][SIG_MAX_CERT_SIZ
     }
 
     derEncStep(derTSEQEncStart(Signature, buf, count, 0x7F4E), buf, count);
-    
+
     derEncStep(derTSIZEEnc(buf, 0x5F29, sig->sig_len), buf, count);
     derEncStep(derOCTEnc(buf, sig->sig,sig->sig_len), buf, count);
 
@@ -188,7 +188,7 @@ static size_t sigEnc(octet buf[], cmd_sig_t* sig, octet certs[][SIG_MAX_CERT_SIZ
     derEncStep(derTSEQEncStop(buf, count, Certs), buf, count);
     derEncStep(derTSEQEncStop(buf, count, Signature), buf,count);
 
-   // ASSERT(derIsValid(buf,count));
+    // ASSERT(derIsValid(buf,count));
 
     return count;
 }
@@ -242,12 +242,13 @@ static size_t sigDec(octet der[], size_t count, cmd_sig_t* sig, octet certs[][SI
 */
 static err_t sigReadCerts(const char* names, octet certs[][SIG_MAX_CERT_SIZE], size_t certs_lens[], size_t * certs_cnt){
     char* blob = blobCreate(strLen(names));
+
     char* m_certs = blob;
     strCopy(m_certs, names);
 
     *certs_cnt = 0;
     bool_t stop = FALSE;
-    while (!stop){
+    while (!stop) {
         size_t i = 0;
         for (; m_certs[i] != '\0' && m_certs[i] != CERTS_DELIM; i++);
         if (m_certs[i] == '\0')
@@ -314,42 +315,35 @@ err_t cmdSigRead(size_t *der_len, cmd_sig_t* sig, octet certs[][SIG_MAX_CERT_SIZ
     ASSERT(memIsNullOrValid(sig, sizeof (cmd_sig_t)));
 
     FILE* fp;
-    size_t der_count;
-    octet * buf = 0;
+    size_t der_count = SIG_MAX_CERTS * (512 + 128) + 96 + 16;
+    octet buf[SIG_MAX_CERTS * (512 + 128) + 96 + 16];
+    octet * der = buf;
+    size_t file_size = cmdFileSize(file);
+
+    if (der_count > file_size){
+        der += der_count - file_size;
+        der_count = file_size;
+    }
 
     fp = fopen(file, "rb");
 
     if (!fp){
         return ERR_FILE_NOT_FOUND;
     }
-    fseek(fp, - (signed)sizeof (size_t), SEEK_END);
-    fread(&der_count, sizeof(size_t), 1, fp);
+    memSetZero(buf, sizeof(buf));
+    fseek(fp, - (signed) der_count, SEEK_END);
+    fread(der, 1,der_count,fp);
+    memRev(buf, sizeof (buf));
 
-    buf = (octet*) blobCreate(der_count);
-    memSetZero(buf, der_count);
-
-    if (!buf){
-        return ERR_OUTOFMEMORY;
-    }
-
-    fseek(fp, - (signed)(der_count + sizeof (size_t)), SEEK_END);
-    fread(buf, 1,der_count,fp);
-//
-//    if (!derIsValid(buf, der_count)) {
-//        blobClose(buf);
-//        return ERR_BAD_SIG;
-//    }
-
-    if (sigDec(buf, der_count, sig, certs) == SIZE_MAX){
-        blobClose(buf);
+    if ((der_count = sigDec(buf, sizeof (buf), sig, certs)) == SIZE_MAX){
         return ERR_BAD_SIG;
     }
+
 
     if (der_len){
         *der_len = der_count;
     }
 
-    blobClose(buf);
     return ERR_OK;
 }
 
@@ -364,6 +358,7 @@ err_t cmdSigRead(size_t *der_len, cmd_sig_t* sig, octet certs[][SIG_MAX_CERT_SIZ
 err_t cmdSigWrite(cmd_sig_t* sig, octet certs[][SIG_MAX_CERT_SIZE], const char* file, bool_t append){
 
     size_t count;
+    size_t max_der = SIG_MAX_CERTS * (512 + 128) + 96 + 16;
     octet der[SIG_MAX_CERTS * (512 + 128) + 96 + 16];
     FILE* fp;
 
@@ -374,12 +369,11 @@ err_t cmdSigWrite(cmd_sig_t* sig, octet certs[][SIG_MAX_CERT_SIZE], const char* 
         return ERR_FILE_OPEN;
     }
 
-    if (fwrite(der, 1, count, fp) != count){
+    memRev(der, sizeof (der));
+    if (fwrite(der + max_der - count, 1, count, fp) != count){
         return ERR_OUTOFMEMORY;
     }
-    if (fwrite(&count, sizeof(size_t), 1, fp) != 1){
-        return ERR_OUTOFMEMORY;
-    }
+
     fclose(fp);
 
     return ERR_OK;
@@ -408,7 +402,7 @@ static char getCommand(const char* arg) {
 }
 
 const char* findArgument(int argc,char* argv[], const char *argName){
-       
+
     for (int i = 0; i < argc-1; i++){
         if (strcmp(argv[i], argName) == 0){
             return argv[i+1];
@@ -451,7 +445,7 @@ static err_t sigParseOptions(
         char* sig_file,
         char* certs,
         bool_t* has_certs
-        ){
+){
 
     cmd_pwd_t pwd;
     bool_t pwd_provided = FALSE;
@@ -545,14 +539,13 @@ static err_t sigParseOptions(
             }
             ASSERT(memIsValid(privkey_len, sizeof (size_t)));
 
-            //если схема пароля не предоставлена, личный ключ читается как открытый
-
             *privkey_len = 0;
             if (pwd_provided){
                 if(cmdPrivkeyRead(privkey, privkey_len, argv[0], pwd) != ERR_OK){
                     return ERR_CMD_PARAMS;
                 }
             } else {
+                //если схема пароля не предоставлена, личный ключ читается как открытый
                 FILE *fp = fopen(argv[0],"rb");
                 if (!fp){
                     printf("ERROR: failed to open private key container '%s'\n", argv[0]);
@@ -624,14 +617,14 @@ static err_t sigParseOptions(
 
 int bsumHashFileWithEndPadding(octet hash[], size_t hid, const char* filename, unsigned endPadding)
 {
-	size_t file_size;
-	size_t total_readed;
-	bool_t eof_reached;
-	FILE* fp;
-	octet state[4096];
-	octet buf[4096];
-	size_t count;
-	// открыть файл
+    size_t file_size;
+    size_t total_readed;
+    bool_t eof_reached;
+    FILE* fp;
+    octet state[4096];
+    octet buf[4096];
+    size_t count;
+    // открыть файл
 
     if (endPadding > 0){
         file_size = cmdFileSize(filename);
@@ -639,49 +632,49 @@ int bsumHashFileWithEndPadding(octet hash[], size_t hid, const char* filename, u
         file_size = 0;
     }
 
-	fp = fopen(filename, "rb");
+    fp = fopen(filename, "rb");
 
-	if (!fp)
-	{
-		printf("ERROR : failed to open file '%s'\n", filename);
-		return -1;
-	}
+    if (!fp)
+    {
+        printf("ERROR : failed to open file '%s'\n", filename);
+        return -1;
+    }
 
-	total_readed = 0;
-	eof_reached = FALSE;
+    total_readed = 0;
+    eof_reached = FALSE;
 
-	// хэшировать
-	ASSERT(beltHash_keep() <= sizeof(state));
-	ASSERT(bashHash_keep() <= sizeof(state));
-	hid ? bashHashStart(state, hid / 2) : beltHashStart(state);
-	while (!eof_reached)
-	{
-		count = fread(buf, 1, sizeof(buf), fp);
+    // хэшировать
+    ASSERT(beltHash_keep() <= sizeof(state));
+    ASSERT(bashHash_keep() <= sizeof(state));
+    hid ? bashHashStart(state, hid / 2) : beltHashStart(state);
+    while (!eof_reached)
+    {
+        count = fread(buf, 1, sizeof(buf), fp);
 
-		if (endPadding > 0 && total_readed + count >= file_size - endPadding){
+        if (endPadding > 0 && total_readed + count >= file_size - endPadding){
 
-			count =  (file_size - endPadding) - total_readed;
-			eof_reached = TRUE;
-		}
-		if (count == 0)
-		{
-			if (ferror(fp))
-			{
-				fclose(fp);
-				printf("%s: FAILED [read]\n", filename);
-				return -1;
-			}
-			break;
-		}
-		hid ? bashHashStepH(buf, count, state) : 
-			beltHashStepH(buf, count, state);
+            count =  (file_size - endPadding) - total_readed;
+            eof_reached = TRUE;
+        }
+        if (count == 0)
+        {
+            if (ferror(fp))
+            {
+                fclose(fp);
+                printf("%s: FAILED [read]\n", filename);
+                return -1;
+            }
+            break;
+        }
+        hid ? bashHashStepH(buf, count, state) :
+        beltHashStepH(buf, count, state);
 
-		total_readed += count;
-	}
-	// завершить
+        total_readed += count;
+    }
+    // завершить
     fclose(fp);
-	hid ? bashHashStepG(hash, hid / 8, state) : beltHashStepG(hash, state);
-	return 0;
+    hid ? bashHashStepG(hash, hid / 8, state) : beltHashStepG(hash, state);
+    return 0;
 }
 
 #pragma endregion
@@ -690,7 +683,7 @@ int bsumHashFileWithEndPadding(octet hash[], size_t hid, const char* filename, u
 
 #pragma region Выработка / проверка подписи
 
-const char* sigCurveName(size_t hid){
+static const char* sigCurveName(size_t hid){
     switch (hid)
     {
         case 128:
@@ -704,7 +697,7 @@ const char* sigCurveName(size_t hid){
     }
 }
 
-const char* sigHashAlgIdentifier(size_t hid){
+static const char* sigHashAlgIdentifier(size_t hid){
     switch (hid)
     {
         case 128:
@@ -739,7 +732,7 @@ static err_t sigVfyCerts(
         octet  certs[][SIG_MAX_CERT_SIZE],  /*!< [in] сертификаты для проверки */
         size_t* certs_lens,                 /*!< [in] длины всех сертификатов */
         size_t certs_cnt                    /*!< [in] количество сертификатов */
-        ){
+){
 
     btok_cvc_t cvc_anchor[1];
 
@@ -808,7 +801,7 @@ static err_t sigSign(int argc, char* argv[]){
     size_t oid_len;
     bign_params params;
     err_t code;
-    octet* t;
+    octet t[64];
     size_t t_len;
     bool_t has_certs;
 
@@ -845,14 +838,11 @@ static err_t sigSign(int argc, char* argv[]){
     else
         t_len = 0;
 
-
     code = sigVfyCerts(0, 0, 0, 0, 0,certs, sig->certs_len, sig->certs_cnt);
     ERR_CALL_CHECK(code)
 
-
     code = bignSign2(sig->sig, &params, oid_der, oid_len,hash, privkey, t, t_len);
     ERR_CALL_CHECK(code)
-
 
     return cmdSigWrite(sig, certs, sig_file_name, strEq(sig_file_name, file_name));
 }
@@ -904,7 +894,7 @@ static err_t sigVfy(int argc, char* argv[]) {
     hid = (pubkey_len ? pubkey_len : last_cert->pubkey_len)  * 2;
 
     memSetZero(hash, sizeof (hash));
-    code = bsumHashFileWithEndPadding(hash, hid, file_name,strEq(file_name, sig_file_name) ? der_len + sizeof (size_t) : 0);
+    code = bsumHashFileWithEndPadding(hash, hid, file_name,strEq(file_name, sig_file_name) ? der_len : 0);
     ERR_CALL_CHECK(code)
 
     code = bignStdParams(params, sigCurveName(hid));
@@ -1110,6 +1100,7 @@ static int sigMain(int argc, char* argv[]){
 
     --argc;
     ++argv;
+
     switch (cmd) {
 
         case COMMAND_SIGN:
